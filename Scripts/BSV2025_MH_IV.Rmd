@@ -1,0 +1,450 @@
+---
+title: "BSV 2025 - Brandschaden Wahrscheinlichkeit"
+author: "Mirco Heidemann"
+date: "20/01/2019"
+output: pdf_document
+---
+
+## Inhalt der Analyse
+Verschiedene Grafiken
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(RColorBrewer)
+library(kableExtra)
+library(reshape2)
+
+## relative pfade
+data_pth = '../Data/'
+
+## --- Save the ggplot's
+width_plot = 12
+# height_plot = (3/4) * width_plot
+height_plot = (9/16) * width_plot
+```
+
+##### Portfoliodaten: Import und wrangling
+```{r message = FALSE, cache=TRUE}
+portfolio <- read_csv2(paste0(data_pth, 'gebaeudebestand_201801_georef.csv'),
+                       locale(encoding = "iso-8859-1"), col_names = TRUE,
+                       col_types = cols_only(
+                         'objektId' = col_integer(),
+                         'zweckcode' = col_integer(),
+                         'zweckBeschr' = col_character(),
+                         'zweckKat' = col_integer(),
+                         'versSum' = col_number(),
+                         'volumen' = col_number(),
+                         'gebBaujahr' = col_integer(),
+                         'geox' = col_character(),
+                         'geoy' = col_character()
+                       )) %>% 
+  mutate(zweckcode_zweistlg = as.integer(zweckcode/100),
+         zweck = ifelse(zweckcode == 2020 & versSum <= 2e6, 1,
+                        ifelse(zweckcode == 2020 & versSum > 2e6, 2,
+                               zweckcode_zweistlg))) %>% 
+  rename(zweckcode_einstlg = zweckKat)
+```
+
+Anzahl Gebäude, Versicherungssumme und gemittelte Expositionszeit pro zweistelligem Zweckcode sowie die Kategorien EFH und MFH.
+Unterteilung nach EFM (neuer Zweckcode "1") und MFH (neuer Zweckcode "2"): Wohngebäude (Zweckcode 2020) mit einer Versicherungssumme bi 2 Mio. gelten als EHM, Wohngebäude mit einer Versicheurngssumme von über 2 Mio. als MFH.
+
+```{r}
+tbl_expo_vor_95 <- portfolio %>%
+  filter(gebBaujahr <= 1995) %>% 
+  mutate(expo_vor_95 = max(portfolio$gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(anzahl_vor_95 = n(),
+            expo_vor_95 = mean(expo_vor_95))
+
+tbl_expo_nach_95 <- portfolio %>%
+  filter(gebBaujahr > 1995) %>% 
+  mutate(expo_nach_95 = max(portfolio$gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(anzahl_nach_95 = n(),
+            expo_nach_95 = mean(expo_nach_95))
+
+tbl_expo <- portfolio %>% 
+  mutate(exposition = max(gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(geb_anzahl = n(),
+            exposition = mean(exposition)) %>% 
+  left_join(tbl_expo_vor_95, by = "zweck") %>%
+  left_join(tbl_expo_nach_95, by = "zweck")
+```
+
+##### Schadendaten: Import und wrangling:
+- Daten zu Gebäudeschäden und Brandtoten laden
+- Nur Schäden zwischen 1981 und 2018
+- Doppelte Schaden ID nur einmal verwenden
+
+```{r message = FALSE, cache=TRUE}
+brandopfer <- read_csv2(paste0(data_pth, 'gvz_schaeden_mit_brandopfern_201812.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'), Ausdr3 < 2018) %>% 
+  rename(verletzte = SchadenVerletzte, todesopfer = SchadenTodesopfer) %>% 
+  dplyr::select(c(2, 22:23))
+
+# Schadendaten laden und filtern: GVZ Schäden zwischen 1982 und 2017
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>%
+  mutate(schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", GebaeudeZweckText)),
+                                       "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_zweistlg = as.integer(str_sub(zweckcode, 1, 2)),
+         zweckcode_einstlg = as.integer(str_sub(zweckcode, 1, 1)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+"))) %>% 
+    ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE) %>% 
+    left_join(brandopfer, by = c('SchadenId' = 'SchadenId')) %>% 
+  # Annahme: NA's in Todesopfer = 0
+  mutate(todesopfer = ifelse(is.na(todesopfer), 0, todesopfer),
+         verletzte = ifelse(is.na(verletzte), 0, verletzte)) %>% 
+  select(GebaeudeId, SchadenId, SchadenDatum, Ausdr3, SchadenArtBezeichnung, SbwVerWert,
+         SchadenSumme, schadensatz, GebaeudeBaujahr, zweck, zweckcode, zweckcode_zweistlg, 
+         zweckcode_einstlg, schadenursache, schadencode, verletzte, todesopfer)
+
+# Entferne nicht weiter benötigter Datensatz
+rm(brandopfer)
+```
+
+
+```{r}
+schad <- schad %>% 
+  # Zweckcodekategorien füer EFH und MFH
+  mutate(zwck = ifelse(zweckcode == 2020 & SbwVerWert <= 2e6, 1,
+                        ifelse(zweckcode == 2020 & SbwVerWert > 2e6, 2,
+                               zweckcode_zweistlg))) %>% 
+  # nur schäden grösser Null
+  filter(SchadenSumme > 0,
+         # Wenn Ursache "unbekannt" oder ".", dann entfernen
+         !is.na(schadencode) & schadencode > 0)
+```
+
+
+##### Zusammenfassung der Brandursachen nach Kategorien
+Kriterieum: Änlichkeit in der Brandauslösung
+```{r message = FALSE, cache=TRUE}
+ursache_kat <- read_csv2(paste0(data_pth, 'brandursache_kategorien.csv'),
+                       locale(encoding = "iso-8859-1"),
+                       col_names = TRUE,
+                       col_types = NULL)
+
+tbl_ursache <- schad %>% 
+  filter(SchadenArtBezeichnung == "Feuer") %>% 
+  group_by(schadencode, schadenursache) %>% 
+  summarize(schad_anzahl = n(),
+            schad_sum = sum(SchadenSumme),
+            todesopfer = sum(todesopfer))
+
+tbl_ursachekat <- tbl_ursache %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  arrange(KatCode)
+
+knitr::kable(select(tbl_ursachekat, schadencode, schadenursache, KatCode, Kategorie),
+             col.names = c('Schadencode', 'Schadenursache', 'Kategorie Code',
+                           'Kategorie'),
+             align = c('c', 'l', 'c', 'l'), digits = c(0, 0, 0, 0),
+             caption = 'Brandursachen Kategorien')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>% 
+  column_spec(2, width = "20em")
+```
+
+#### Mosaic plot
+The widths of the boxes are proportional to the percentage of y-variable (Zweck). The heights of the boxes are proportional to percent x-var (Brandusachen Kategorie).
+```{r}
+freq_table <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer')) %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  mutate(bsv_generation = ifelse(GebaeudeBaujahr <= 1995, "Gen_1", "Gen_2")) %>% 
+  group_by(zwck) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  filter(geb_anzahl > 99) %>% 
+  # 2 way cross table
+  select(zwck, Kategorie) %>%
+  # # 3 way cross table
+  # select(zwck, Kategorie, bsv_generation) %>%
+  table()
+```
+
+Mosaic plot
+```{r}
+# Farbpalette
+library(colorspace)
+
+mosaicplot(t(freq_table),
+           sort = 2:1,
+           # off = 30,
+           color = colorspace::qualitative_hcl(14),
+           main = "Schadenanzahl pro Zweck und Ursache",
+           # sub = "subtitle",
+           xlab = "Zweck",
+           ylab = "Brandursachen Kategorie",
+           las = 2)
+
+```
+Mosaic Plot II
+```{r message = FALSE}
+library(vcd)
+
+## Formula interface for tabulated data plus shading and legend:
+vcd::mosaic(~ zwck + Kategorie,
+       data = freq_table,
+       legend = FALSE,
+       main = "Schadenanzahl pro Zweck und Ursache",
+       #shade = TRUE,
+       gp=gpar(fill=colorspace::qualitative_hcl(14, 'Dynamic')),
+       zero_size = 0.1,
+       # margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "cm")
+       title_margins = margin(b = -0.1, t = 2, l = 2, unit = "cm"),
+       labeling = labeling_border(rot_labels = c(90,0,0,0), 
+                                 just_labels = c("left", 
+                                                 "center", 
+                                                 "center", 
+                                                 "right"),
+                                 varnames = FALSE,
+                                 gp_labels = gpar(fontsize = 6),
+                                 gp_varnames = gpar(fontsize = 10, fontface = 2),
+                                 offset_varnames = c(3, 0, 0, 0)))
+```
+
+
+#### Spineplot
+```{r}
+spineplot(freq_table,
+          col = rep(brewer.pal(7,"Paired")))
+```
+
+#### circular barplot - Brandtote per Brandursache
+```{r}
+schad_circ <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1981,
+         todesopfer > 0) %>% 
+  group_by(schadenursache) %>% 
+  summarize(anzahl = sum(todesopfer)) %>% 
+  mutate(id = seq(1, length(anzahl), 1))
+
+# ----- prepare a dataframe for labels ---- #
+# Get the name and the y position of each label
+label_data=schad_circ
+
+# calculate the angle of the labels
+number_of_bar=nrow(label_data)
+# I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+angle= 90 - 360 * (label_data$id-0.5) /number_of_bar
+
+# calculate the alignment of labels: right or left
+label_data$hjust<-ifelse( angle < -90, 1, 0)
+
+# flip angle to make them readable
+label_data$angle<-ifelse(angle < -90, angle+180, angle)
+# ----- ------------------------------------------- ---- #
+
+
+# id is a factor. If x is numeric, there is some space between the first bar
+p <- ggplot(label_data, aes(x=as.factor(id), y=anzahl)) +
+  # add bars with a blue color
+  geom_bar(stat="identity", fill=alpha("skyblue", 0.7)) +
+  labs(title = "Brandtote per Brandursache") +
+  # Limits of the plot = very important. The negative value controls the size of the inner circle, the positive one is useful to add size over each bar
+  ylim(-1,30) +
+  
+  # Custom the theme: no axis title and no cartesian grid
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    # remove unnecessary margin around plot
+    plot.margin = unit(rep(-1,4), "cm"),
+    plot.title = element_text(size = 16, hjust = 0.5, vjust = -20, color = "#4e4d47")
+                              # margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm")),
+  ) +
+  
+  # makes the coordinate polar instead of cartesian.
+  coord_polar(start = 0) +
+  
+  # Add the labels, using the label_data dataframe that we have created before
+  geom_text(data=label_data, aes(x=id, y=anzahl + 0.5, label=schadenursache,
+                                 hjust=hjust), color="black", fontface="bold",alpha=0.6,
+            size=2.5, angle= label_data$angle, inherit.aes = FALSE )
+p
+# ggsave(p, filename = "circular_barplot_brandtoten.pdf", device = 'pdf',
+#         width = width_plot, height = height_plot, units = "in")
+```
+
+#### stacked area plot: entwicklung der jährlichen schadensumme, per einstelligem zweckcode und Brandursache
+
+Entwicklung der jährlichen schadensumme, per einstelligem zweckcode
+```{r}
+schad_abs <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         SchadenSumme > 0) %>% 
+  group_by(Ausdr3, zweckcode_einstlg) %>% 
+  summarize(schadensumme = sum(SchadenSumme))%>% 
+  ## fill empty gaps with 0
+  tidyr::spread(key = zweckcode_einstlg, value = schadensumme, fill = 0) %>%
+  tidyr::gather(key = zweckcode_einstlg, value = schadensumme, - Ausdr3) %>%
+  arrange(Ausdr3, zweckcode_einstlg)
+
+## schaden absolut
+ggplot(schad_abs, aes(x = Ausdr3, y = schadensumme/1e6,
+                      fill=factor(zweckcode_einstlg))) + 
+  geom_area(colour="gray40", size=.05, alpha=.7) +
+  labs(title = "Jährliche Schadensumme pro einstelligem Zweckcode") +
+  scale_fill_discrete(name = "Zweck") +
+  ylab("Schadensumme in Mio.") + xlab("") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(size = 16))
+```
+
+Entwicklung des jährlichen schadensatzes, per einstelligem zweckcode
+```{r}
+schad_satz <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         SchadenSumme > 0) %>% 
+  group_by(Ausdr3, zweckcode_einstlg) %>% 
+  summarize(schadensumme = sum(SchadenSumme),
+            verSum = sum(SbwVerWert))%>%
+  mutate(schadensatz = schadensumme/verSum) %>% 
+  filter(verSum > 0,
+         schadensatz <= 1) %>% 
+  select(-c(schadensumme, verSum)) %>% 
+  ## fill empty gaps with 0
+  tidyr::spread(key = zweckcode_einstlg, value = schadensatz, fill = 0) %>%
+  tidyr::gather(key = zweckcode_einstlg, value = schadensatz, - Ausdr3) %>%
+  arrange(Ausdr3, zweckcode_einstlg)
+
+## schadensatz
+ggplot(schad_satz, aes(x=Ausdr3, y=schadensatz, fill=factor(zweckcode_einstlg))) + 
+    geom_area(colour="gray40", size=.05, alpha=.7) +
+    labs(title = "Jährlicher Schadensatz pro einstelligem Zweckcode") +
+  scale_fill_discrete(name = "Zweck") +
+  ylab("Schadensatz") + xlab("") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(size = 16))
+```
+
+Pro Brandursachen Kategorie, schadensumme
+```{r}
+ursache_schad <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         SchadenSumme > 0) %>% 
+  ## Brandursachen-Kategorien zu schadenfile
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  group_by(Ausdr3, Kategorie) %>% 
+  summarize(schadensumme = sum(SchadenSumme)) %>% 
+  ## fill empty gaps with 0
+  tidyr::spread(key = Kategorie, value = schadensumme, fill = 0) %>%
+  tidyr::gather(key = Kategorie, value = schadensumme, - Ausdr3) %>%
+  arrange(Ausdr3, Kategorie)
+
+ggplot(ursache_schad, aes(x=Ausdr3, y=schadensumme/1e6, fill=factor(Kategorie))) + 
+  geom_area(colour="gray40", size=.05, alpha=.7) +
+      labs(title = "Jährliche Schadensumme pro Brandursache") +
+  scale_fill_discrete(name = "Brandursachen\nKategorie") +
+  ylab("Schadensumme in Mio.") + xlab("") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(size = 16))
+```
+
+Pro Brandursachen Kategorie, schadensatz
+```{r}
+ursache_satz <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         SchadenSumme > 0) %>% 
+  ## Brandursachen-Kategorien zu schadenfile
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  group_by(Ausdr3, Kategorie) %>% 
+  summarize(schadensumme = sum(SchadenSumme),
+            verSum = sum(SbwVerWert))%>%
+  mutate(schadensatz = schadensumme/verSum) %>% 
+  filter(verSum > 0,
+         schadensatz <= 1) %>% 
+  select(-c(schadensumme, verSum)) %>% 
+  ## fill empty gaps with 0
+  tidyr::spread(key = Kategorie, value = schadensatz, fill = 0) %>%
+  tidyr::gather(key = Kategorie, value = schadensatz, - Ausdr3) %>%
+  arrange(Ausdr3, Kategorie)
+
+ggplot(ursache_satz, aes(x=Ausdr3, y=schadensatz, fill=factor(Kategorie))) + 
+    geom_area(colour="gray40", size=.05, alpha=.7) +
+      labs(title = "Jährlicher Schadensatz pro Brandursache") +
+  scale_fill_discrete(name = "Brandursachen\nKategorie") +
+  ylab("Schadensatz") + xlab("") +
+  theme_bw(base_size = 14) +
+  theme(plot.title = element_text(size = 16))
+```
+
+#### bubble map: geografische verteilung der brandschäden
+```{r}
+library(ggswissmaps)
+library(maps)
+library(viridis)
+
+# Get the world polygon and extract Switzerland
+CH <- map_data("world") %>% filter(region == "Switzerland")
+
+## Extract from ggswissmaps data the districts of canton ZH
+ZH <- shp_df[["g1k15"]] %>% filter(KTNR %in% 1)
+
+## geoRef schaden
+schad_geo <- schad %>%
+  left_join(select(portfolio, objektId, geox, geoy), by = c('GebaeudeId' = 'objektId')) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         SchadenSumme >= 1e3,
+         !is.na(geox)) %>%
+  arrange(SchadenSumme) %>% 
+  mutate(SchadenSumme = SchadenSumme/1e6,
+         geox = as.numeric(geox),
+         geoy = as.numeric(geoy))
+
+my_breaks = c(0, 0.01, 0.1, 1, 2.5, 5, 7.5, max(schad_geo$SchadenSumme))
+
+ggplot() +
+  geom_polygon(data = ZH, aes(x = long, y = lat, group = group),
+               fill = "#969696", alpha = 0.3) +
+  geom_point(data = schad_geo, aes(x = geox, y = geoy, size = SchadenSumme,
+                               color = SchadenSumme), alpha = 0.9) +
+  scale_color_viridis(option = "magma", trans = "log", breaks = my_breaks,
+                      name = "Schadensumme\n[Mio. CHF]" ) +
+  scale_size_continuous(name = "Schadensumme\n[Mio. CHF]",
+                        breaks = my_breaks, range = c(1, 6)) +
+  guides(color = guide_legend(), size=guide_legend()) +
+  scale_alpha_continuous(name = "Schadensumme\n[Mio. CHF]", range = c(1, 6),
+                         breaks = my_breaks) +
+  theme_void() + coord_equal() + 
+    # labs(title = "Feuerschäden der GVZ seit 1981", 
+    #    subtitle = "", 
+    #    caption = "Quelle: GVZ") +
+  ggtitle("Feuerschäden der GVZ seit 1981") +
+  theme(
+    # move caption to the left
+    plot.caption = element_text(hjust = 0),
+    #legend.position = c(0.85, 0.8),
+    text = element_text(color = "#22211d"),
+    # plot.background = element_rect(fill = "#f5f5f2", color = NA), 
+    plot.background = element_rect(fill = "#ffffff", color = NA), 
+    # panel.background = element_rect(fill = "#f5f5f2", color = NA), 
+    panel.background = element_rect(fill = "#ffffff", color = NA), 
+    # legend.background = element_rect(fill = "#f5f5f2", color = NA),
+    legend.background = element_rect(fill = "#ffffff", color = NA),
+    plot.title = element_text(size = 16, hjust = 0.1, color = "#4e4d47",
+                              margin = margin(b = -0.1, t = 0.4, l = 2, unit = "cm")
+                              )
+  )
+
+```
+

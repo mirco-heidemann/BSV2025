@@ -1,0 +1,194 @@
+---
+title: "BSV2025 - Teil 3"
+author: "Jan Kleinn"
+date: "14.01.2019"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+## Ziel
+Ziel dieser Analyse ist, die Wahrscheinlichkeit zu berechnen, dass ein Gebäude einen Branschaden hat und dass in einem Gebäude eine Person an Brand stirbt oder verletzt wird. Dafür soll berücksichtigt werden, dass nicht alle Gebäude im Portfolio seit Beginn des Schaden-Datenbank schon bestehen. Das bedeutet, dass die Normierung mit der Zeit über einen gemittelten Zeitraum geschieht, der auf der Verteilung der Baujahre im Portfolio besteht.
+
+Die Analysen werden für das gesamte Gebäude-Portfolio der GVZ durchgeführt aber auch pro Zweckcode und in einem weitere Schritt pro Brandursache.
+
+## Zweckcodes
+Für die meisten Gebäude reichen zweistellige Zweckcodes aus. Allerdings nehmen wir Zweckcode 2020 aus den 20ern heraus und unterteilen 2020 noch in EFH und MFH.
+
+```{r}
+## Portfolio lesen
+in.file <- '../Data/gebaeudebestand_201801_zweck.csv'
+pf <- read.csv(in.file, sep = ';', stringsAsFactors = FALSE)
+
+## 2-stelligen Zweckcode hinzufügen
+pf$zweck2 <- floor(pf$zweckcode / 100)
+
+## Übersicht verschaffen
+library(data.table)
+pf.dt <- data.table(pf)
+pf2 <- pf.dt[order(zweck2),
+             .(anzahl = .N, versSum = sum(versSum)/1e6, vol = sum(volumen)),
+             by = zweck2]
+knitr::kable(pf2, col.names = c('Zweck', 'Anzahl Gebäude',
+                                'Versicherungssumme', 'Volumen'),
+             align = c('c', 'r', 'r', 'r'), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Verteilung der Zweckbestimmungen')
+
+```
+
+Man sieht deutlich, wie Zweckbestimmung 20 dominiert. Somit macht es Sinn, 2020 aus 20 zu extrahieren und noch in kleine und grosse Gebäude (EFH und MFH) zu unterteilen.
+
+
+```{r fig.show = 'hold', out.width = '50%'}
+## Verteilung der Versicherungssumme von 2020
+ind2020 <- which(pf$zweckcode == 2020)
+hist(pf$versSum[ind2020], breaks = seq(0, 1e8, 1e5), xlim = c(0, 5e6),
+     main = 'Histogramm der Versicherungssumme von Zweckcode 2020',
+     xlab = 'Versicherungssumme')
+hist(pf$volumen[ind2020], breaks = seq(0, 2e5, 100), xlim = c(0, 5e3),
+     main = 'Histogramm des Volumens von Zweckcode 2020',
+     xlab = 'Volumen')
+```
+
+Es ist leider keine deutliche bimodale Verteilung zu sehen, die es erlauben würde, die Zweckbestimmung von 2020 einfach in zwei Kategorien aufzuteilen (EFH, MFH). Wir trennen erst einmal bei 2 Mio. Franken und gehen davon aus, damit die meisten EFH herauszutrennen. MFH mit einer Versicherungssumme von weniger als 2 Mio. Franken dürften eher kleiner MFH mit wenigen Wohneinheiten sein. Wir kreieren somit zwei neue Zwekccodes für 2020 <= 2 Mio. Franken (1) und 2020 > 2 Mio. Franken (2).
+
+```{r}
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum <= 2e6)
+pf$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum > 2e6)
+pf$zweck2[ind] <- 2
+
+## neue Tabelle des ehemaligen 2-stelligen Zweckcodes 20
+pf.dt <- data.table(pf[(pf$zweck2 < 10 | pf$zweck2 == 20), ])
+pf2 <- pf.dt[order(zweck2),
+             .(anzahl = .N, versSum = sum(versSum)/1e6, vol = sum(volumen)),
+             by = zweck2]
+knitr::kable(pf2, col.names = c('Zweck', 'Anzahl Gebäude',
+                                'Versicherungssumme', 'Volumen'),
+             align = c('c', 'r', 'r', 'r'), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Verteilung der Zweckbestimmungen')
+```
+
+## Durchschnittliches Alter der Gebäude
+Jetzt berechnen wir die durchschnittliche Lebensdauer der Gebäude pro 2-stelliger Zweckbestimmung seit Beginn der Schadendaten, d.h. seit 1981. Gleichzeitig wird diese durchschnittliche Lebensdauer nach der letzten BSV unterteilt. Dafür werden Gebäude mit Baujahr <1993 und >1994 separat betrachtet. Die Jahre 1993 und 1994 sind hier ausgeklammert, um den Übergang der BSV zu berücksichtigen.
+
+```{r}
+## Lebensdauer berechnen
+pf$LebDauer <- 2018 - pmax(pf$gebBaujahr, 1981)
+
+## neue Tabelle der 2-stelligen Zweckcodes
+pf.dt <- data.table(pf)
+pf2 <- pf.dt[order(zweck2), .(Anz = .N, LebDauer = mean(LebDauer)),
+             by = zweck2]
+pf3 <- pf.dt[gebBaujahr < 1993, .(Anz1 = .N, LebDauer1 = mean(LebDauer)),
+             by = zweck2][order(zweck2)]
+pf4 <- pf.dt[gebBaujahr > 1994, .(Anz2 = .N, LebDauer2 = mean(LebDauer)),
+             by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, pf3, all = TRUE)
+pf2 <- merge(pf2, pf4, all = TRUE)
+knitr::kable(pf2, col.names = c('Zweck', 'Anzahl', 'Lebensdauer',
+                                'Anz. <1993', 'Lebend. <1993',
+                                'Anz. >1994', 'Lebensd. >1994'),
+             align = c('c', 'r', 'c', 'r', 'c', 'r', 'c'),
+             digits = c(0, 0, 1, 0, 1, 0, 1),
+             format.args = list(big.mark = "'"),
+             caption = 'mittlere Lebensdauer')
+```
+
+## Wahrscheinlichkeit eines Brandschadens oder Brandtoten
+Hier kombinieren wir die Schäden mit der durchschnittlichen Lebensdauer und berechnen die Wahrscheinlichkeit, dass ein Gebäude in einem Jahr einen Brandschaden oder einen Brandtoten hat. Dazu wird zuerst die Anzahl Brandschäden durch die Anzahl Gebäude (der Zweckbestimmung) geteilt und dann mit der durchschnittlichen Lebensdauer normiert. Dies geschieht analog zu der in Teil 1 vorgestellten Analyse:
+$$P_{S>0}^{n Jahre} = \frac{N_{S>0}^{n Jahre}} {N_{Total}}$$
+$$P_{S>0}^{1 Jahr} = 1-\big(1-P_{S>0}^{n Jahre}\big)^{1/n}$$
+Wobei als "nJahre" hier die durchschnittliche Lebendsauer der Gebäude verwendet wird.
+
+Wir beschränken uns bei der Ausgabe der Ergebnisse auf jene Zweckbestimmungen, für die sowohl vor als auch nach der Änderung der BSV noch mindestens 100 Gebäude im Portfolio sind. Dies soll eine solide Datengrundlage und somit robustere Aussage garantieren.
+
+```{r}
+## einlesen der Schadendaten
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, sep = ',', stringsAsFactors = FALSE)
+## auf die benötigten Variablen reduzieren
+schad <- schad[,c('GebaeudeBaujahr', 'zweck_code', 'SbwVerWert',
+                  'CodTextDt', 'schad_index', 'verletzte', 'todesopfer')]
+## 2-stelligen Zweckcode hinzufügen
+schad$zweck2 <- floor(schad$zweck_code / 100)
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert <= 2e6)
+schad$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert > 2e6)
+schad$zweck2[ind] <- 2
+
+## Anzahl Schäden hinzufügen, für alle, <1993 und >1994
+schad.dt <- data.table(schad)
+schad2 <- schad.dt[schad_index > 0, .(SchadAnz = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr < 1993 & schad_index > 0,
+                   .(SchadAnz1 = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr > 1994 & schad_index > 0,
+                   .(SchadAnz2 = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+
+## Anzahl Brände mit mindestens einem Toten hinzufügen
+schad2 <- schad.dt[todesopfer > 0, .(TodAnz = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr < 1993 & todesopfer > 0,
+                   .(TodAnz1 = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr > 1994 & todesopfer > 0,
+                   .(TodAnz2 = .N), by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+
+## Anzahl Brandtote pro Kategorie ausgeben
+tab.out <- pf2[, c('zweck2', 'TodAnz', 'TodAnz1', 'TodAnz2')]
+ind <- which(!is.na(tab.out$TodAnz))
+if (length(ind) > 0) {
+  tab.out <- tab.out[ind,]
+}
+knitr::kable(tab.out, col.names = c('Zweck', 'Alle', '<1993', '>1994'),
+             align = c('c', rep('r', 3)), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Anzahl Brände mit Todesopfern')
+
+## jährliche Wahrscheinlichkeit mind. eines Brandschadens
+pf2$PSchad <- 1 - pmax((1 - pf2$SchadAnz / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PSchad1 <- 1 - pmax((1 - pf2$SchadAnz1 / pf2$Anz1), 0)^(1/pf2$LebDauer1)
+pf2$PSchad2 <- 1 - pmax((1 - pf2$SchadAnz2 / pf2$Anz2), 0)^(1/pf2$LebDauer2)
+
+## jährliche Wahrscheinlichkeit mind. eines Brandtoten
+pf2$PTod <- 1 - pmax((1 - pf2$TodAnz / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PTod1 <- 1 - pmax((1 - pf2$TodAnz1 / pf2$Anz1), 0)^(1/pf2$LebDauer1)
+pf2$PTod2 <- 1 - pmax((1 - pf2$TodAnz2 / pf2$Anz2), 0)^(1/pf2$LebDauer2)
+
+## neue Tabelle des ehemaligen 2-stelligen Zweckcodes 20
+tab.out <- pf2[, c('zweck2')]
+tab.out$PSchad <- sprintf("%.2f %%", 100 * pf2$PSchad)
+tab.out$PSchad1 <- sprintf("%.2f %%", 100 * pf2$PSchad1)
+tab.out$PSchad2 <- sprintf("%.2f %%", 100 * pf2$PSchad2)
+tab.out$PTod <- sprintf("%.4f %%", 100 * pf2$PTod)
+tab.out$PTod1 <- sprintf("%.4f %%", 100 * pf2$PTod1)
+tab.out$PTod2 <- sprintf("%.4f %%", 100 * pf2$PTod2)
+
+## Beschränkung der Ausgabe auf Zweckcodes > 100 Gebäude
+ind.geb <- which(pf2$Anz1 > 99 & pf2$Anz2 > 99)
+tab.out <- tab.out[ind.geb,]
+
+knitr::kable(tab.out, col.names = c('Zweck', 'P(S > 0)',
+                                'P(S > 0), <1993', 'P(S > 0), >1994',
+                                'P(T > 0)', 'P(T > 0), <1993',
+                                'P(T > 0), >1994'),
+             align = c('c', rep('r', 6)), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Wahrscheinlichkeit von Schaden (S) und Toten (T)')
+
+```

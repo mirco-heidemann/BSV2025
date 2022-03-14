@@ -1,0 +1,146 @@
+---
+title: "BSV2025 - Teil 3a: P(T>0) nach Ursache"
+author: "Jan Kleinn"
+date: "21.01.2019"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+## Ziel
+Die Tabelle mit der Wahrscheinlichkeit eines Brandtoten (inkl. <1993 und >1994) für die Zweckcodes mit Todesfällen in der Statistik auch nach Ursachen unterteilen. Allerdings nur für den 2-stelligen Zweckcode 20, da alle anderen zu wenige Daten (d.h. Anzahl Brände mit Brandtoten) haben.
+
+## Zweckcodes
+Für die meisten Gebäude reichen zweistellige Zweckcodes aus. Allerdings nehmen wir Zweckcode 2020 aus den 20ern heraus und unterteilen 2020 noch in EFH und MFH mit der Grenze bei 2 Mio. CHF Versicherungssumme.
+
+```{r}
+## Portfolio lesen
+in.file <- '../Data/gebaeudebestand_201801_zweck.csv'
+pf <- read.csv(in.file, sep = ';', stringsAsFactors = FALSE)
+
+## 2-stelligen Zweckcode hinzufügen
+pf$zweck2 <- floor(pf$zweckcode / 100)
+
+## auf Zwekccode 20 reduzieren
+ind <- which(pf$zweck2 == 20)
+pf <- pf[ind,]
+
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum <= 2e6)
+pf$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum > 2e6)
+pf$zweck2[ind] <- 2
+
+```
+
+## Durchschnittliches Alter der Gebäude
+Jetzt berechnen wir die durchschnittliche Lebensdauer der Gebäude pro 2-stelliger Zweckbestimmung seit Beginn der Schadendaten, d.h. seit 1981. Gleichzeitig wird diese durchschnittliche Lebensdauer nach der letzten BSV unterteilt. Dafür werden Gebäude mit Baujahr <1993 und >1994 separat betrachtet. Die Jahre 1993 und 1994 sind hier ausgeklammert, um den Übergang der BSV zu berücksichtigen.
+
+```{r}
+## Lebensdauer berechnen
+pf$LebDauer <- 2018 - pmax(pf$gebBaujahr, 1981)
+
+## neue Tabelle der 2-stelligen Zweckcodes
+library(data.table)
+pf.dt <- data.table(pf)
+pf2 <- pf.dt[order(zweck2), .(Anz = .N, LebDauer = mean(LebDauer)),
+             by = zweck2]
+pf3 <- pf.dt[gebBaujahr < 1993, .(Anz1 = .N, LebDauer1 = mean(LebDauer)),
+             by = zweck2][order(zweck2)]
+pf4 <- pf.dt[gebBaujahr > 1994, .(Anz2 = .N, LebDauer2 = mean(LebDauer)),
+             by = zweck2][order(zweck2)]
+pf2 <- merge(pf2, pf3, all = TRUE)
+pf2 <- merge(pf2, pf4, all = TRUE)
+
+```
+
+## Wahrscheinlichkeit eines Brandtoten
+Hier kombinieren wir die Schäden mit der durchschnittlichen Lebensdauer und berechnen die Wahrscheinlichkeit, dass ein Gebäude in einem Jahr einen Brandtoten hat. Dazu wird zuerst die Anzahl Brandschäden mit Todesfällen durch die Anzahl Gebäude (der Zweckbestimmung) geteilt und dann mit der durchschnittlichen Lebensdauer normiert. Dies geschieht analog zu der in Teil 1 vorgestellten Analyse:
+$$P_{S>0}^{n Jahre} = \frac{N_{S>0}^{n Jahre}} {N_{Total}}$$
+$$P_{S>0}^{1 Jahr} = 1-\big(1-P_{S>0}^{n Jahre}\big)^{1/n}$$
+Wobei als "nJahre" hier die durchschnittliche Lebendsauer der Gebäude verwendet wird.
+
+Wir beschränken uns bei der Ausgabe der Ergebnisse auf jene Zweckbestimmungen, für die sowohl vor als auch nach der Änderung der BSV noch mindestens 100 Gebäude im Portfolio sind. Dies soll eine solide Datengrundlage und somit robustere Aussage garantieren.
+
+```{r}
+## einlesen der Schadendaten
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, sep = ',', stringsAsFactors = FALSE)
+## auf die benötigten Variablen reduzieren
+schad <- schad[,c('GebaeudeBaujahr', 'zweck_code', 'SbwVerWert',
+                  'CodTextDt', 'schad_index', 'verletzte', 'todesopfer')]
+## unsinnige Ursachen-Codes entfernen
+ind <- which(schad$CodTextDt == '.' | schad$CodTextDt == '0  unbekannt')
+if (length(ind) > 0) {
+  schad <- schad[-ind,]
+}
+## 2-stelligen Zweckcode hinzufügen
+schad$zweck2 <- floor(schad$zweck_code / 100)
+## auf Zwekccode 20 reduzieren
+ind <- which(schad$zweck2 == 20)
+schad <- schad[ind,]
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert <= 2e6)
+schad$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert > 2e6)
+schad$zweck2[ind] <- 2
+
+## Brandursachen extrahieren und Kategorien hinzufügen
+ursach <- data.frame(CodText = sort(unique(schad$CodTextDt)),
+                     stringsAsFactors = FALSE)
+ursach$Code <- as.integer(substr(ursach$CodText, 1, 2))
+ursach$Ursache <- substr(ursach$CodText, 4, nchar(ursach$CodText))
+## Kategorien lesen
+library(openxlsx)
+in.file <- '../Kategorien.xlsx'
+kategorien <- read.xlsx(in.file, sheet = 2)
+ursach <- merge(ursach, kategorien)
+ursach <- ursach[order(ursach$KatCode, ursach$Code),]
+
+## Ursachen-Kategorien hinzufügen
+schad <- merge(schad, ursach, by.x = 'CodTextDt', by.y = 'CodText')
+
+## Anzahl Brände mit mindestens einem Toten hinzufügen
+schad.dt <- data.table(schad)
+schad2 <- schad.dt[todesopfer > 0, .(TodAnz = .N),
+                   by = c('zweck2', 'KatCode')][order(zweck2)]
+pf2 <- merge(pf2, schad2, all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr < 1993 & todesopfer > 0, .(TodAnz1 = .N),
+                   by = c('zweck2', 'KatCode')][order(zweck2)]
+pf2 <- merge(pf2, schad2, by = c('zweck2', 'KatCode'), all = TRUE)
+schad2 <- schad.dt[GebaeudeBaujahr > 1994 & todesopfer > 0, .(TodAnz2 = .N),
+                   by = c('zweck2', 'KatCode')][order(zweck2)]
+pf2 <- merge(pf2, schad2, by = c('zweck2', 'KatCode'), all = TRUE)
+
+## Tabelle der Anzahl Brände mit Todesopfern nach Zweck und Ursache ausgeben
+knitr::kable(pf2[,c('zweck2', 'KatCode', 'TodAnz', 'TodAnz1', 'TodAnz2')],
+             col.names = c('Zweck', 'Ursache', 'Alle', '<1993', '>1994'),
+             align = c('c', 'c', rep('r', 3)), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Anzahl Brände mit Todesopfern nach Zweck und Ursache')
+
+## jährliche Wahrscheinlichkeit mind. eines Brandtoten
+pf2$PTod <- 1 - pmax((1 - pf2$TodAnz / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PTod1 <- 1 - pmax((1 - pf2$TodAnz1 / pf2$Anz1), 0)^(1/pf2$LebDauer1)
+pf2$PTod2 <- 1 - pmax((1 - pf2$TodAnz2 / pf2$Anz2), 0)^(1/pf2$LebDauer2)
+
+## neue Tabelle
+tab.out <- pf2[, c('zweck2', 'KatCode')]
+tab.out$PTod <- sprintf("%.5f %%", 100 * pf2$PTod)
+tab.out$PTod1 <- sprintf("%.5f %%", 100 * pf2$PTod1)
+tab.out$PTod2 <- sprintf("%.5f %%", 100 * pf2$PTod2)
+
+knitr::kable(tab.out, col.names = c('Zweck', 'Ursache', 'P(T > 0)',
+                                    'P(T > 0), <1993', 'P(T > 0), >1994'),
+             align = c('c', 'c', rep('r', 3)), digits = 0,
+             format.args = list(big.mark = "'"),
+             caption = 'Wahrscheinlichkeit eines Toten (T)')
+
+```

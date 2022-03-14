@@ -1,0 +1,150 @@
+---
+title: "BSV2025 - Teil 6: EP-Kurven"
+author: "Jan Kleinn"
+date: "21.01.2019"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+## Ziel
+EP-Kurven pro Ursache über alle Zweckcodes, da in Teil 5 festgestellt, dass dies sonst zu viele Linien pro Grafik ergibt und man nichts erkennen kann.
+
+```{r}
+## Portfolio lesen
+in.file <- '../Data/gebaeudebestand_201801_zweck.csv'
+pf <- read.csv(in.file, sep = ';', stringsAsFactors = FALSE)
+
+```
+
+## Durchschnittliches Alter der Gebäude
+Jetzt berechnen wir die durchschnittliche Lebensdauer der Gebäude pro 2-stelliger Zweckbestimmung seit Beginn der Schadendaten, d.h. seit 1981.
+
+```{r}
+## Lebensdauer berechnen
+pf$LebDauer <- 2018 - pmax(pf$gebBaujahr, 1981)
+LebDauer <- mean(pf$LebDauer)
+
+```
+
+## Wahrscheinlichkeit eines Brandschadens oder Brandtoten
+Hier kombinieren wir die Schäden mit der durchschnittlichen Lebensdauer und berechnen die Wahrscheinlichkeit, dass ein Gebäude in einem Jahr einen Schaden grösser Null hat. Dazu wird zuerst die Anzahl Schäden durch die Anzahl Gebäude geteilt und dann mit der durchschnittlichen Lebensdauer normiert. Dies geschieht analog zu den in Teil 3 und 4 vorgestellten Analyse.
+
+```{r}
+## einlesen der Schadendaten
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, sep = ',', stringsAsFactors = FALSE)
+## Brandursachen extrahieren und Kategorien hinzufügen
+ursach <- data.frame(CodText = sort(unique(schad$CodTextDt))[-c(1:2)],
+                     stringsAsFactors = FALSE)
+ursach$Code <- as.integer(substr(ursach$CodText, 1, 2))
+ursach$Ursache <- substr(ursach$CodText, 4, nchar(ursach$CodText))
+## Kategorien lesen
+library(openxlsx)
+in.file <- '../Kategorien.xlsx'
+kategorien <- read.xlsx(in.file, sheet = 2)
+ursach <- merge(ursach, kategorien)
+ursach <- ursach[order(ursach$KatCode, ursach$Code),]
+
+```
+
+```{r}
+## auf die benötigten Variablen reduzieren
+schad <- schad[,c('GebaeudeBaujahr', 'zweck_code', 'SbwVerWert',
+                  'CodTextDt', 'schad_index', 'verletzte', 'todesopfer')]
+## unsinnige Ursachen-Codes entfernen
+ind <- which(schad$CodTextDt == '.' | schad$CodTextDt == '0  unbekannt')
+if (length(ind) > 0) {
+  schad <- schad[-ind,]
+}
+## nur Schäden grösser Null verwenden
+ind <- which(schad$schad_index > 0)
+if (length(ind) > 0) {
+  schad <- schad[ind,]
+}
+
+## Ursachen-Kategorien hinzufügen
+schad <- merge(schad, ursach, by.x = 'CodTextDt', by.y = 'CodText')
+
+## 2-D Array ( Ursache, Schadengrenzwert) definieren
+unique.kat <- sort(unique(schad$KatCode))
+schaden <- seq(0, 1e7, 1e3)
+pschad <- array(dim = c(length(unique.kat), length(schaden)))
+
+library(data.table)
+schad.dt <- data.table(schad)
+for (s in 1:length(schaden)) {
+  ## Anzahl Schäden hinzufügen
+  schad2 <- schad.dt[schad_index > schaden[s], .(SchadAnz = .N), by = KatCode]
+  schad2 <- schad2[order(KatCode)]
+  
+  ## jährliche Wahrscheinlichkeit eines Brandschadens grösser als Grenzwert
+  PSchad <- 1 - pmax((1 - schad2$SchadAnz / nrow(pf)), 0)^(1/LebDauer)
+  
+  ind <- match(schad2$KatCode, unique.kat)
+  pschad[ind, s] <- PSchad
+}
+
+```
+
+Bis hier sind die Daten berechnet worden, jetzt werden sie dargestellt.
+
+```{r}
+
+library(RColorBrewer)
+xmin <- 100
+xmax <- 1e5
+ymin <- 1e3
+ymax <- 1e6
+
+## Null Schaden in 1e-4 umwandeln, für logarithmische Darstellung
+ind <- which(schaden < 1)
+if (length(ind > 0)) schaden[ind] <- 1e-4
+
+## Grafiken erstellen - pro Ursache
+cols <- c(brewer.pal(12, 'Paired'), 'grey60', 'grey20')
+axis.x <- 10^seq(ceiling(log10(xmin)), floor(log10(xmax)))
+axis.y <- 10^seq(ceiling(log10(ymin)), floor(log10(ymax)))
+
+pdf.file <- 'BSV2015_EP-Alle.pdf'
+pdf(pdf.file, paper = 'a4', width = 8, height = 11)
+par(mfrow = c(2, 1), mar = c(4, 5, 3, 2), las = 1)
+
+plot(1, 1, type = 'n', xlim = c(xmin, xmax), ylim = c(ymin, ymax),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE, log = 'xy')
+abline(v = c(seq(2, 9), seq(10, 90, 10), seq(100, 900, 100),
+             seq(1e3, 9e3, 1e3), seq(1e4, 9e4, 1e4)), col = 'grey80')
+abline(h = c(seq(2, 9), seq(10, 90, 10), seq(100, 900, 100),
+             seq(1e3, 9e3, 1e3), seq(1e4, 9e4, 1e4), seq(1e5, 9e5, 1e5)),
+       col = 'grey80')
+abline(v = 10^seq(ceiling(log10(xmin)), floor(log10(xmax))), col = 'grey60')
+abline(h = 10^seq(ceiling(log10(ymin)), floor(log10(ymax))), col = 'grey60')
+for (j in 1:length(unique.kat)) {
+  lines(1/pschad[j,], schaden, lwd = 2, col = cols[j])
+}
+# p.all <- apply(pschad[,j,], 2, sum, na.rm = TRUE)
+# lines(1/p.all, schaden, lwd = 2, col = 'black')
+axis(1, axis.x, labels = formatC(axis.x, format = 'd', big.mark = "'"))
+axis(2, axis.y, labels = axis.y/1e6)
+title(xlab = 'Wiederkehrperiode [Jahre]', line = 2.2)
+title(ylab = 'Brandschaden [Mio. CHF]', line = 3.7)
+title(main = 'über alle Gebäude', line = 0.5)
+box()
+
+
+plot(1, 1, type = 'n', axes = FALSE, ann = FALSE)
+leg.txt <- unique.kat
+for (i in 1:length(leg.txt)) {
+  leg.txt[i] <- paste(unique.kat[i],
+                      unique(ursach$Kategorie[ursach$KatCode == unique.kat[i]]),
+                      sep = ': ')
+}
+legend('topleft', leg.txt, col = cols, lwd = 3, bty = 'n')
+
+dev.off()
+```

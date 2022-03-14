@@ -1,0 +1,612 @@
+---
+title: "BSV2025 - GVZ Datenanalyse"
+author: "Mirco Heidemann"
+date: "Dezember 2018"
+output:
+  word_document: default
+  pdf_document: default
+abstract: BSV2025 - GVZ Datenanalyse, v2
+---
+
+#### Datenimport und Wrangling:
+- Aus der gesamten Schadendatenbank nur Feuerschäden mit Schadendatum zwischen 1981 und 2018 filtern.
+- Doppelte Schaden Id's dürfen nur einmal verwendet werden (Teilauszahlungen).
+- Die Schäden werden auf den Stand von Dezember 2018 indexiert. Für die Indexierung wird der GVZ-Index verwendet.
+
+```{r setup, echo = TRUE, include = FALSE}
+library(tidyverse)
+```
+
+```{r message = FALSE, cache=TRUE}
+## relative pfade
+data_pth = '../Data/'
+
+# Indexierungsfile laden
+gvz_index <- read_csv2(paste0(data_pth, 'versicherungsindex_gvz.csv')) %>% 
+  # take 'illegal' characters and replaces them with periods
+  rename_all(make.names) %>% 
+  mutate(jahr = as.integer(format(as.Date(Jahr,"%d.%m.%Y"), "%Y")),
+         index = as.integer(Versicherungsindex.GVZ)) %>% 
+  dplyr::select(c(5, 6))
+
+# Schadendaten mit Brandopfern laden und filtern: Nur Feuerschäden zwischen 1981 und 2018
+brand <- read_csv2(paste0(data_pth, 'gvz_schaeden_mit_brandopfern_201812.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1981 & Ausdr3 < 2018) %>% 
+  rename(verletzte = SchadenVerletzte, todesopfer = SchadenTodesopfer) %>% 
+  dplyr::select(c(2, 22:23))
+
+# Schadendaten laden und filtern: Nur Feuerschäden zwischen 1982 und 2017
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1981 & Ausdr3 < 2018) %>% 
+  ## schaeden indexieren
+  left_join(gvz_index, by = c("Ausdr3" = "jahr")) %>% 
+  mutate(schad_index = round(max(index) / index * SchadenSumme),
+         schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", GebaeudeZweckText)),
+                                       "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_kat = as.integer(str_sub(zweckcode, 1, 2)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+"))) %>% 
+  left_join(brand, by = c('SchadenId' = 'SchadenId')) %>% 
+  # Annahme: NA's in Todesopfer = 0
+  mutate(todesopfer = ifelse(is.na(todesopfer), 0, todesopfer),
+         verletzte = ifelse(is.na(verletzte), 0, verletzte)) %>% 
+  dplyr::select(-c(3, 5, 6, 11, 14:17, 20:22, 24, 25))
+
+## doppelten Schaden ID's nur einmal beruecksichtigen!
+
+## welche schaden ID sind doppelt vorhanden?
+schad_duplicates = schad %>%
+  group_by(SchadenId) %>%
+  filter(n() > 1) %>%
+  ## duplikate nur einmal anzeigen
+  filter(row_number() == 1)
+
+## doppelte schaden ID Zeilen nur einmal
+schad = schad %>%
+  ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE)
+
+## Aktuelles Portfolio laden und Versicherungssumme nach Zweck zusammenfassen
+portfolio <- read_csv2(paste0(data_pth, 'gebaeudebestand_201801_georef.csv'),
+                       locale(encoding = "iso-8859-1"), col_names = TRUE,
+                       col_types = cols(
+                         katasterNr = col_number(),
+                         versSum = col_number())) %>% 
+  dplyr::select(c('objektId', 'zweckcode', 'zweckBeschr', 'zweckKat', 'versSum', 'volumen')) %>% 
+  mutate(zweckcode_kat2 = as.integer(zweckcode/100))
+
+## Schadenfile mit Volumen ergaenzen
+schad <- schad %>% left_join(dplyr::select(portfolio, c(objektId, volumen)),
+                             by = c('GebaeudeId' = 'objektId'))
+
+tbl_portfolio_zweck <- portfolio %>% filter(versSum > 0) %>% 
+  group_by(zweckcode, zweckBeschr) %>% 
+  summarise(geb_anzahl_portfolio = n(), versSum_portfolio = sum(versSum))
+
+tbl_portfolio_zweckkat <- portfolio %>% filter(versSum > 0) %>% 
+  group_by(zweckcode_kat2) %>% 
+  summarise(geb_anzahl_portfolio = n(), versSum_portfolio = sum(versSum))
+
+```
+
+### Explorative Datenanalyse - Sachschaden
+```{r}
+tbl_schaden_zweck <- schad %>% filter(schad_index > 0) %>% 
+  group_by(zweckcode, zweck) %>%
+  summarise(schadenanzahl = n(), schadsum = sum(schad_index)) %>%
+  mutate(anteil_schadenanzahl = round(schadenanzahl / sum(schad$schad_index > 0), 4) * 100,
+         anteil_schadsum = round(schadsum / sum(schad$schad_index), 4) * 100)
+
+tbl_schaden_zweckkat <- schad %>% filter(schad_index > 0) %>% 
+  group_by(zweckcode_kat) %>%
+  summarise(schadenanzahl = n(), schadsum = sum(schad_index),
+            mittlerer_schadensatz = round(mean(schadensatz), 4)) %>%
+  mutate(anteil_schadenanzahl = round(schadenanzahl / sum(schad$schad_index > 0), 4) * 100,
+         anteil_schadsum = round(schadsum / sum(schad$schad_index), 4) * 100) %>% 
+  left_join(tbl_portfolio_zweckkat, by = c('zweckcode_kat' = 'zweckcode_kat2')) %>% 
+  mutate(anteil_schadenanzahl_portfolio = round(schadenanzahl / geb_anzahl_portfolio, 4) * 100,
+         anteil_schadsum_portfolio = round(schadsum / versSum_portfolio, 4) * 100) %>% 
+  arrange(desc(anteil_schadenanzahl))
+```
+
+##### Anzahl Schadenfälle nach Zweckcode Kategorie, absteigend sortiert
+```{r}
+arrange(tbl_schaden_zweckkat, desc(anteil_schadenanzahl))
+```
+
+#### Bar chart: Anzahl Schadenfälle nach Zweckcode Kategorien
+```{r}
+## barplot nach schadenanzahl
+dat_plot <- arrange(tbl_schaden_zweckkat, desc(anteil_schadenanzahl))
+
+theme_set(theme_bw(base_size = 12))
+
+ggplot(data = dat_plot[1:10,],
+       aes(x = factor(zweckcode_kat), y = schadenanzahl, fill = factor(zweckcode_kat))) +
+  geom_bar(stat="identity") +
+  scale_fill_discrete(name = "Zweckcode Kategorie") +
+  geom_text(aes(label = paste0(anteil_schadenanzahl, "%")),
+            position = position_dodge(0.9),
+            vjust = -0.5,
+            size = 2.5) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = "'",
+                                                 scientific = FALSE)) +
+  ylab("Schadenanzahl") +
+  labs(title =
+         "Brandschadenanzahl nach Zweckcode Kategorie", 
+       subtitle = "89% der gesamt Schadenanzahl durch 10 Zweckcode Kategorien", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major.y = element_line(colour = "gray"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "right")
+```
+
+##### Schadensumme nach Zweckcode, absteigend sortiert
+```{r}
+arrange(tbl_schaden_zweckkat, desc(anteil_schadsum))
+```
+
+##### Bar chart: Schadensumme nach Zweckcode Kategorie
+```{r}
+dat_plot <- arrange(tbl_schaden_zweckkat, desc(anteil_schadsum))
+
+## barplot nach schadenanzahl
+theme_set(theme_bw(base_size = 12))
+
+ggplot(data = dat_plot[1:10,],
+       aes(x = factor(zweckcode_kat), y = schadsum * 1e-6,
+           fill = factor(zweckcode_kat))) +
+  geom_bar(stat="identity") +
+  scale_fill_discrete(name = "Zweckcode Kategorie") +
+  geom_text(aes(label = paste0(anteil_schadenanzahl, "%")),
+            position = position_dodge(0.9),
+            vjust = -0.5,
+            size = 2.5) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = "'",
+                                                 scientific = FALSE)) +
+  ylab("Schadensumme [Mio. CHF]") +
+  labs(title =
+         "Brandschadensummen nach Zweckcode Kategorie", 
+       subtitle = "75% der Gesamtschadensumme durch 10 Zweckcode Kategorien", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major.y = element_line(colour = "gray"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "right")
+```
+
+##### Schadensatz nach Zweckcode, absteigend sortiert
+```{r}
+arrange(tbl_schaden_zweckkat, desc(mittlerer_schadensatz))
+```
+
+#### Boxplot: Schadensatz nach Zweckcode Kategorien
+```{r}
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = factor(zweckcode_kat), y = schadensatz)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  #scale_fill_discrete(name = "BV Generation") +
+  scale_color_manual(name = "Zweckcode Kategorie",
+                     labels = "",
+                     values = "") +
+  ylab("Log Schadensatz") + xlab("Zweckcode Kategorie") +
+  labs(title = "Mittlere Schadensätze nach Zweckcode Kategorie", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.text.x = element_text(angle = 60, hjust = 1))
+
+```
+
+### Explorative Datenanalyse - Brandursache
+```{r}
+tbl_schaden_ursache <- schad %>% filter(schad_index > 0) %>% 
+  group_by(schadencode, schadenursache) %>%
+  summarise(schadenanzahl = n(), schadsum = sum(schad_index),
+            mittlerer_schadensatz = round(mean(schadensatz), 4)) %>%
+  mutate(anteil_schadenanzahl = round(schadenanzahl / sum(schad$schad_index > 0), 3) * 100,
+         anteil_schadsum = round(schadsum / sum(schad$schad_index), 4) * 100) %>%
+  arrange(desc(anteil_schadenanzahl))
+```
+
+##### Anzahl Schadenfälle nach Brandursache, absteigend sortiert
+```{r}
+arrange(tbl_schaden_ursache, desc(anteil_schadenanzahl))
+```
+
+#### Bar chart: Anzahl Schadenfälle nach Brandursache
+```{r}
+theme_set(theme_bw(base_size = 12))
+
+ggplot(data = tbl_schaden_ursache[1:10,],
+       aes(x = factor(schadenursache), y = schadenanzahl,
+           fill = factor(schadenursache))) +
+  geom_bar(stat="identity") +
+  scale_fill_discrete(name = "Brandursache") +
+  geom_text(aes(label = paste0(anteil_schadenanzahl, "%")),
+            position = position_dodge(0.9),
+            vjust = -0.5,
+            size = 2) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = "'",
+                                                 scientific = FALSE)) +
+  ylab("Schadenanzahl") +
+  labs(title =
+         "Brandschadenanzahl nach Brandursache", 
+       subtitle = "80% der Schadenanzahl durch 10 Ursachen", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major.y = element_line(colour = "gray"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "right")
+```
+
+##### Schadensumme nach Brandursache, absteigend sortiert
+```{r}
+arrange(tbl_schaden_ursache, desc(anteil_schadsum))
+```
+
+##### Bar chart: Schadensumme nach Brandursache
+```{r}
+dat_plot <- arrange(tbl_schaden_ursache, desc(anteil_schadsum))
+
+theme_set(theme_bw(base_size = 12))
+
+ggplot(data = dat_plot[1:10,],
+       aes(x = factor(schadenursache), y = schadsum * 1e-6,
+           fill = factor(schadenursache))) +
+  geom_bar(stat="identity") +
+  scale_fill_discrete(name = "Brandursache") +
+  geom_text(aes(label = paste0(anteil_schadsum, "%")),
+            position = position_dodge(0.9),
+            vjust = -0.5,
+            size = 2) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = "'",
+                                                 scientific = FALSE)) +
+  ylab("Schadensumme [Mio. CHF]") +
+  labs(title =
+         "Brandschadensumme nach Brandursache", 
+       subtitle = "71% der Schadensumme durch 10 Ursachen", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major.y = element_line(colour = "gray"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "right")
+```
+
+#### Boxplot: Schadensatz nach Brandursache
+```{r}
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = factor(schadencode), y = schadensatz)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  #scale_fill_discrete(name = "BV Generation") +
+  scale_color_manual(name = "Brandursache",
+                     labels = "",
+                     values = "") +
+  ylab("Log Schadensatz") + xlab("Brandursache") +
+  labs(title = "Mittlere Schadensätze nach Brandursache", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.text.x = element_text(angle = 60, hjust = 1))
+
+```
+
+### Explorative Datenanalyse - BV Generationen
+1993, 2005 und 2015 wurde jeweils eine neue BV erlassen. Sind Unterschiede in den mittleren Schadensummen erkennbar, wenn ein Gebäude in der jeweiligen BV Generation gebaut wurde? Die BV Generation 2015 ist für eine Analyse noch zu jung und wird nicht berücksichtigt.
+```{r}
+tbl_bsv_generation <- data.frame(baujahr = seq(min(schad$GebaeudeBaujahr),
+                                        format(Sys.Date(), "%Y"), by = 1))
+tbl_bsv_generation$bsv_generation <- cut(tbl_bsv_generation$baujahr,
+                                       # breaks = c(0, 1993, 2005, Inf),
+                                       # BSV Generation inkl. 2 jahre Puffer
+                                       breaks = c(0, 1995, Inf),
+                                       include.lowest = TRUE,
+                                       labels=c(as.character(1:2)))
+
+## geb zusammenfassen pro baujahresklasse ...
+tbl_bsv_generation <- left_join(schad, tbl_bsv_generation, by = c("GebaeudeBaujahr" = "baujahr")) %>% 
+  group_by(bsv_generation) %>% 
+  summarise(schadenanzahl = n(), mean_schadensatz = mean(schadensatz),
+            median_schadensatz = median(schadensatz)) %>% 
+  mutate(anteil_schadenanzahl = round(schadenanzahl / nrow(schad) * 100))
+```
+
+```{r}
+tbl_baujahr <- data.frame(baujahr = seq(min(schad$GebaeudeBaujahr),
+                                        format(Sys.Date(), "%Y"), by = 1))
+tbl_baujahr$bsv_generation <- cut(tbl_baujahr$baujahr,
+                                       #breaks = c(0, 1993, 2005, Inf),
+                                       breaks = c(0, 1995, Inf),
+                                       include.lowest = TRUE,
+                                       labels=c('vor 1995', 'nach 1995'))
+
+schad <- left_join(schad[which(schad$GebaeudeBaujahr < 2019),], tbl_baujahr,
+                   by = c("GebaeudeBaujahr" = "baujahr"))
+```
+
+```{r}
+# box plot
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = bsv_generation, y = schadensatz,
+           color = bsv_generation)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  #scale_fill_discrete(name = "BSV Generation") +
+  scale_color_manual(name = "BSV Generation\n(inkl. 2 Jahre Puffer)",
+                     labels = c("Vor 1995", "Nach 1995"),
+                     values = c("#E69F00", "#56B4E9")) +
+  ylab("Log Schadensatz") +
+  labs(title =
+         "Schadensätze nach BSV Generationen", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  theme(plot.title = element_text(size = 14, colour = "black",
+                                  vjust = 1, hjust = 0),
+        axis.title.y = element_text(size = 12, vjust = 1.1),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid.major.y = element_line(colour = "gray"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        legend.position = "right")
+  
+```
+
+#### Scatterplot Log-Versicherungssumme und Log-Schadensumme nach BSV Generation
+```{r}
+# scatter plot
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = schad_index,
+           y = SbwVerWert,
+           color = factor(bsv_generation))) +
+  geom_point(shape=1) +
+    scale_color_manual(name = "BSV Generation\n(inkl. 2 Jahre Puffer)",
+                     labels = c("Vor 1995", "Nach 1995"),
+                     values = c("#E69F00", "#56B4E9")) +
+  scale_y_log10() + scale_x_log10() +
+  ylab("Log Versicherungssumme") + xlab("Log Schaden")
+  
+```
+
+#### Scatterplot Log-Schadensatz und Log-Volumen nach BSV Generation
+```{r}
+# scatter plot
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0 & !is.na(schad$volumen) &
+                     schad$volumen > 0),],
+       aes(x = schadensatz,
+           y = volumen,
+           color = factor(bsv_generation))) +
+  geom_point(shape=1) +
+    scale_color_manual(name = "BSV Generation\n(inkl. 2 Jahre Puffer)",
+                     labels = c("Vor 1995", "Nach 1995"),
+                     values = c("#E69F00", "#56B4E9")) +
+  scale_y_log10() + scale_x_log10() +
+  ylab("Log Schadensatz") + xlab("Log Volumen")
+  
+```
+
+Bemerkung:
+Aus linearer Regression ergeben sich folgende entscheidende zweckcode kategorien fuer den schadengrad:
+16, 28, 32, 33, 79, 90 (dies sind die Kategorien welche die höchsten Schadengrade mit grossen Schadensamples aufweisen. Siehe auch Tabelle "Schadensatz nach Zweckcode"").
+oder einstellig: 1, 3, 7, 9
+
+```{r}
+schad <- schad %>% mutate(zweck_einstellig = floor(zweckcode / 1000),
+                          zweck_bsv = ifelse(zweck_einstellig == 1 |
+                                               zweck_einstellig == 3 |
+                                               zweck_einstellig == 7 |
+                                               zweck_einstellig == 9,
+                                             zweck_einstellig, "rest"),
+                          zweck_bsv2 = ifelse((zweckcode_kat == 16 |
+                                                 zweckcode_kat == 28 |
+                                                 zweckcode_kat == 32 |
+                                                 zweckcode_kat == 33 |
+                                                 zweckcode_kat == 79 |
+                                                 zweckcode_kat == 90),
+                                              zweckcode_kat, "rest"))
+```
+
+#### Scatterplot Log-Versicheurngssumme und Log-Schadensumme (indexiert)
+```{r}
+# scatter plot
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = schad_index,
+           y = SbwVerWert,
+           color = factor(zweck_einstellig))) +
+  geom_point(shape=1) +
+    scale_colour_brewer(name = "Einstelliger Zweckcode",
+                    palette = 'Paired') +
+  scale_y_log10() + scale_x_log10() +
+  ylab("Log Versicherungssumme") + xlab("Log Schaden")
+  
+```
+
+```{r}
+# scatter plot
+# library(RColorBrewer)
+# display.brewer.all()
+
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0),],
+       aes(x = schad_index,
+           y = SbwVerWert,
+           color = factor(zweck_bsv2))) +
+  geom_point(shape=1) +
+  scale_colour_brewer(name = "Zweistelliger Zweckcode\n(BSV Kategorien)",
+                    palette = 'Paired') +
+  scale_y_log10() + scale_x_log10() +
+  ylab("Log Versicherungssumme") + xlab("Log Schaden")
+
+## ohne die 'restlichen' zweckcodes
+ggplot(schad[which(schad$schadensatz < 1.2 & schad$schadensatz > 0 & schad$zweck_bsv2 != "rest"),],
+       aes(x = schad_index,
+           y = SbwVerWert,
+           color = factor(zweck_bsv2))) +
+  geom_point(shape=1) +
+  scale_colour_brewer(name = "Zweistelliger Zweckcode\n(BSV Kategorien)",
+                    palette = 'Paired') +
+  scale_y_log10() + scale_x_log10() +
+  ylab("Log Versicherungssumme") + xlab("Log Schaden")
+  
+```
+
+
+#### Multivariate Statistik
+```{r}
+dat <- schad %>%  
+  filter(SbwVerWert > 0,
+         schad_index > 0,
+         schadencode > 0 & !is.na(schadencode),
+         schadensatz < 1.2) %>% 
+  dplyr::select(c(SbwVerWert, schad_index, GebaeudeBaujahr, volumen,
+                  zweck_einstellig, zweck_bsv))
+```
+
+#### Pairs Plot
+```{r}
+my_cols <- c("#d53e4f", "#f46d43", "#fdae61", "#fee08b",
+             "#ffffbf", "#e6f598", "#abdda4", "#66c2a5", "#3288bd")  
+pairs(dat[, c(1, 2, 4)], pch = 19,  cex = 0.5,
+      col = my_cols[dat$zweck_einstellig],
+      lower.panel=NULL)
+```
+
+### Principal Component Analysis
+PCA nur mit numerischen Variablen. Mit den faktoriellen Variablen 'Zweckcode' und 'bsv_generation' wird gruppiert. Die numerischen Variablen 'Versicherungssumme', 'Schadensumme' und 'Volumen' werden logarithmiert um die Streuung zu verringern.
+```{r}
+library(factoextra)
+
+dat <- schad %>%  
+  filter(SbwVerWert > 0,
+         schad_index > 0,
+         schadencode > 0 & !is.na(schadencode),
+         schadensatz < 1.2,
+         volumen > 0, !is.na(volumen)) %>% 
+  # allenfals log versicherungssumme und schadensumme oder schadensatz
+  dplyr::select(c(SbwVerWert, schad_index, schadensatz, volumen, zweck_bsv, bsv_generation)) %>% 
+  mutate(lg_vs = log(SbwVerWert),
+         lg_schad = log(schad_index),
+         lg_schadensatz = log(schadensatz),
+         lg_volumen = log(volumen))
+# pca ohne faktor variable zweck_bsv --> wird fuer gruppierung verwendet  
+schad_pca <- prcomp(dat[,c(7:10)], center = TRUE,scale. = TRUE)
+summary(schad_pca)
+```
+
+PC1 erklärt 60 % der Varianz, d.h. der Information aus den Daten mit zwei Variablen lassen sich mit einer Hauptkomponente zusammenfassen.
+
+#### Plotting der PCA
+Position jedes Brandfalles in Bezug auf PC1 und PC2. Wie verhalten sich die Brandfälle zueinander? Welche sind ähnlich, welche unterscheiden sich? Welche Variable wirkt wie zu jeder PC bei?
+
+```{r message = FALSE}
+library(FactoMineR)
+library(ggpubr)
+
+ind_p <- fviz_pca_biplot(schad_pca, 
+                col.ind = factor(dat$zweck_bsv), palette = "jco", 
+                addEllipses = TRUE, label = "var",
+                col.var = "black", repel = TRUE,
+                legend.title = "BSV Zweckcode") 
+ggpubr::ggpar(ind_p,
+              title = "Principal Component Analysis",
+              subtitle = "Brandschaden, gruppiert nach Zweckcode",
+              caption = "Quelle: GVZ",
+              xlab = "PC1", ylab = "PC2",
+              legend.title = "Zweckcode", legend.position = "top",
+              ggtheme = theme_bw()#, palette = "jco"
+              )
+```
+
+Interpretation: Es sind Gruppen erkennbar. Insbesondere die Gruppe mit Zweckcode 9 unterscheidet sich von den anderen. PC2 trennt lg_schad und lg_schadensatz von lg_vs und lg_volumen. Die variablen tragen ähnlich zu PC1 und PC2 bei.
+
+```{r message = FALSE}
+
+ind_p <- fviz_pca_biplot(schad_pca, 
+                col.ind = factor(dat$bsv_generation), palette = "jco", 
+                addEllipses = TRUE, label = "var",
+                col.var = "black", repel = TRUE,
+                legend.title = "BSV Zweckcode") 
+ggpubr::ggpar(ind_p,
+              title = "Principal Component Analysis",
+              subtitle = "Brandschaden, gruppiert nach BSV Generation",
+              caption = "Quelle: GVZ",
+              xlab = "PC1", ylab = "PC2",
+              legend.title = "BSV Generation", legend.position = "top",
+              ggtheme = theme_bw()#, palette = "jco"
+              )
+```
+Interpretation: Kein Muster erkennbar.
+
+### Explorative Datenanalyse - Brandopfer
+```{r}
+tbl_zweck <- schad %>% filter(todesopfer > 0) %>% 
+  group_by(zweckcode, zweck) %>%
+  summarise(schadenanzahl = n()) %>%
+  mutate(anteil = round(schadenanzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+tbl_ursache <- schad %>% filter(todesopfer > 0) %>% 
+  group_by(schadencode, schadenursache) %>%
+  summarise(schadenanzahl = n()) %>%
+  mutate(anteil = round(schadenanzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+tbl_zweck_ursache <- schad %>% filter(todesopfer > 0) %>% 
+  group_by(zweckcode, zweck, schadencode, schadenursache) %>%
+  summarise(schadenanzahl = n()) %>%
+  mutate(anteil_am_total = round(schadenanzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+tbl_baujahr <- schad %>% filter(todesopfer > 0) %>% 
+  group_by(GebaeudeBaujahr) %>%
+  summarise(schadenanzahl = n()) %>%
+  mutate(anteil = round(schadenanzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+```

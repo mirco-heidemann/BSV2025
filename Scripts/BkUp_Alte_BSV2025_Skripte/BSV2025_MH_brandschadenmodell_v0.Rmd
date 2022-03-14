@@ -1,0 +1,237 @@
+---
+title: "BSV2025 - Modellierung der jährlichen Brandschäden"
+author: "Mirco Heidemann"
+date: "Dezember 2018"
+output:
+  pdf_document: default
+abstract: ...
+---
+
+```{r setup, echo = TRUE, include = FALSE}
+library(tidyverse)
+library(MASS)
+```
+
+```{r message = FALSE, cache=TRUE}
+## relative pfade
+data_pth = '../Data/'
+
+# Indexierungsfile laden
+gvz_index <- read_csv2(paste0(data_pth, 'versicherungsindex_gvz.csv')) %>% 
+  # take 'illegal' characters and replaces them with periods
+  rename_all(make.names) %>% 
+  mutate(jahr = as.integer(format(as.Date(Jahr,"%d.%m.%Y"), "%Y")),
+         index = as.integer(Versicherungsindex.GVZ)) %>% 
+  dplyr::select(c(5, 6))
+
+# Schadendaten laden und filtern: Nur Feuerschäden zwischen 1981 und 2018
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>% 
+  dplyr::filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1981 & Ausdr3 < 2018) %>% 
+  ## schaeden indexieren
+  left_join(gvz_index, by = c("Ausdr3" = "jahr")) %>% 
+  mutate(schad_index = round(max(index) / index * SchadenSumme),
+         schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", GebaeudeZweckText)), "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_kat = as.integer(str_sub(zweckcode, 1, 2)),
+         zweckcode_einstellig = as.integer(str_sub(zweckcode, 1, 1)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+")))
+
+## doppelten Schaden ID's nur einmal beruecksichtigen!
+
+## welche schaden ID sind doppelt vorhanden?
+schad_duplicates = schad %>%
+  group_by(SchadenId) %>%
+  dplyr::filter(n() > 1) %>%
+  ## duplikate nur einmal anzeigen
+  dplyr::filter(row_number() == 1)
+
+## doppelte schaden ID Zeilen nur einmal
+schad = schad %>%
+  ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE)
+
+
+```
+
+#### Aggregiere die indexierten schäden zu jahresschaden
+Nur schäden > 0
+```{r message=FALSE}
+tbl_year <- schad %>%
+  dplyr::filter(schad_index > 0) %>% 
+  group_by(Ausdr3) %>% 
+  summarize(schadenanzahl = n(),
+            schadensumme = sum(schad_index),
+            schadengrad = mean(schadensatz)) %>% 
+  rename(jahr = Ausdr3)
+```
+
+#### Jährliche Schadenanzahl mit einer Lognormalverteilung schätzen.
+Für grosse Lambda passt die Poissonverteilung nicht.
+```{r}
+fit_freq <- fitdistr(tbl_year$schadenanzahl, "lognormal")
+mean_freq <- fit_freq$estimate["meanlog"]
+sd_freq <- fit_freq$estimate["sdlog"]
+```
+
+#### Jährliche Schadensumme mit einer Lognormalverteilung schätzen
+```{r}
+einzel_schaden <- schad %>% dplyr::filter(schad_index > 0) %>% 
+  dplyr::select(schad_index)
+
+fit_loss_lnorm <- fitdistr(einzel_schaden$schad_index, "lognormal")
+meanlog_loss <- fit_loss_lnorm$estimate["meanlog"]
+sdlog_loss <- fit_loss_lnorm$estimate["sdlog"]
+```
+
+#### Sampling
+```{r}
+## Anzahl simulierte jahre
+nSim <- 1e4
+## Initialisierung der Jahresschadenverteilung
+sj <- rep(0, nSim)
+## Random sampling aus der lognorm: Verteilung der Anzahl Schäden pro Jahr
+freq = rlnorm(nSim, mean_freq, sd_freq)
+
+## --- Tail Begrenzung
+## Schadenanzahl nicht hoeher als das doppelte der max beobachteten jahresschäden
+ind <- which(freq > 2 * max(tbl_year$schadenanzahl))
+# freq[ind] <- rlnorm(length(ind), mean_freq, sd_freq)
+freq[ind] <- runif(length(ind), min = min(tbl_year$schadenanzahl),
+                   max = max(tbl_year$schadenanzahl))
+freq <- as.integer(round(freq))
+
+## Zufalls Sampling (Convolution with Monte Carlo)
+for(i in 1:nSim)
+   sj[i] <- sum(rlnorm(n = freq[i], meanlog = meanlog_loss, sdlog = sdlog_loss))
+
+df_sj <- as.data.frame(sj)
+
+```
+
+#### Jahresschadenverteilung
+```{r}
+truehist(sj/1e6, col = '#bdd7e7', prob = TRUE, xlim = c(0, 100),
+         main = "Simulierte jährliche Brandschadenverteilung",
+         ylab = 'relative frequency density', xlab = 'Jährlicher Schaden [Mio. CHF]')
+```
+
+#### Exceedance Probability Kurve
+```{r}
+df_ep <- df_sj %>% arrange(desc(sj)) %>% 
+  mutate(wkp = (nSim + 1) / c(1:nSim),
+         ep = 1/wkp)
+
+# Plot
+theme_set(theme_bw(base_size = 12))
+ggplot(df_ep, aes(x = ep, y = sj/1e6)) +
+  geom_point() +
+  geom_line() +
+  xlab('Überschreitenswahrscheinlichkeit [%]') +
+  ylab('Jahresschaden [Mio. CHF]') +
+  coord_trans(x="log10") +
+    labs(title = "Überschreitenswahrscheinlichkeit jährlicher GVZ Brandschäden", 
+       subtitle = "Simulierte Brandschadenverteilung", 
+       caption = "Quelle: GVZ")
+
+```
+
+#### jahresschadenanzahl per einstelligem zweckcode
+```{r message=FALSE}
+tbl_year_zwkcd <- schad %>%
+  dplyr::filter(schad_index > 0) %>% 
+  group_by(zweckcode_einstellig, Ausdr3) %>% 
+  summarize(schadenanzahl = n()) %>% 
+  rename(jahr = Ausdr3)
+  #split(.,.$zweckcode_einstellig)
+```
+
+#### Sampling der Jahresschäden pro Zweckcode (einstellig)
+Jährliche Schadenanzahl und schadensumme schätzen
+```{r}
+## Anzahl simulierte jahre
+nSim <- 1e4
+
+## w'keit und wkp skalen definieren
+wkp <- (nSim + 1) / c(1:nSim)
+ep <- 1/wkp
+
+# Resultate Liste initierung
+ep_lst <- list()
+
+
+for (j in unique(tbl_year_zwkcd$zweckcode_einstellig))
+{
+  tbl_year_zwkcd %>% dplyr::filter(zweckcode_einstellig == j)
+  
+  # Anzahl Schäden mit einer Poissonverteilung schätzen (alternativ mit einr normalvert.)
+  fit_freq <- fitdistr(tbl_year_zwkcd$schadenanzahl, "Poisson")
+  lambda <- fit_freq$estimate["lambda"]
+  # mean_freq <- fit_freq$estimate["mean"]
+  # sd_freq <- fit_freq$estimate["sd"]
+  
+  #### Jährliche Schadensumme mit einer Lognormalverteilung schätzen
+  ind <- which(schad$schad_index > 0 & schad$zweckcode_einstellig == j)
+  einzel_schaden <- schad$schad_index[ind]
+
+  fit_loss_lnorm <- fitdistr(einzel_schaden, "lognormal")
+  meanlog_loss <- fit_loss_lnorm$estimate["meanlog"]
+  sdlog_loss <- fit_loss_lnorm$estimate["sdlog"]
+
+  ## Initialisierung der Jahresschadenverteilung
+  sj <- rep(0, nSim)
+  ## Random sampling aus der lognorm: Verteilung der Anzahl Schäden pro Jahr
+  freq = rpois(nSim, lambda)
+  # freq = abs(rnorm(nSim, mean_freq, sd_freq))
+
+  ## --- Schadenanzahl Tail Begrenzung 
+  ## Schadenanzahl nicht hoeher als das doppelte der max beobachteten jahresschäden
+  ind <- which(freq > 2 * max(tbl_year$schadenanzahl))
+  freq[ind] <- runif(length(ind), min = min(tbl_year$schadenanzahl),
+                   max = max(tbl_year$schadenanzahl))
+  freq <- as.integer(round(freq))
+
+  ## Zufalls Sampling (Convolution with Monte Carlo)
+  for(i in 1:nSim)
+    sj[i] <- sum(rlnorm(n = freq[i], meanlog = meanlog_loss, sdlog = sdlog_loss))
+  
+  ## --- Schadensumme Tail Begrenzung
+  
+  # EP Kurven in Liste speichern
+  ep_lst[[j]] <- cbind(sort(sj, decreasing = TRUE), wkp, ep, j)
+}
+
+## Konvertiere list zu df
+dfs <- lapply(ep_lst, data.frame, stringsAsFactors = FALSE) 
+df_ep_zwkcd <- dplyr::bind_rows(dfs)
+```
+
+#### Exceedance Probability Kurve
+```{r}
+# Plott eine EP pro einstelligem Zweckcode
+theme_set(theme_bw(base_size = 12))
+
+#ggplot(data = df_plot, aes(x = ep, y = value/1e6, colour = variable)) +
+ggplot(data = df_ep_zwkcd, aes(x = ep, y = V1/1e6, colour = factor(j))) +
+  geom_line() +
+  scale_colour_brewer(name = "Zweckcode",
+                      palette = 'Paired') +
+  xlab('Überschreitenswahrscheinlichkeit [%]') +
+  ylab('Jahresschaden [Mio. CHF]') +
+  coord_trans(x = "log10") +
+  labs(title = "Überschreitenswahrscheinlichkeit jährlicher GVZ Brandschäden", 
+       subtitle = "Simulierte Brandschadenverteilung", 
+       caption = "Quelle: GVZ")
+  
+```
+
+
+

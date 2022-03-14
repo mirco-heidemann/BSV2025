@@ -1,0 +1,590 @@
+---
+title: "BSV2025 - Teil 4"
+author: "Jan Kleinn"
+date: "15.01.2019"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+## Ziel
+- Wahrscheinlichkeit eines Brandschadens und Brandtoten unterteilt nach Ursache.
+- In einem ersten Schritt ohne Unterteilung nach BSV.
+
+## Zweckcodes
+Für die meisten Gebäude reichen zweistellige Zweckcodes aus. Allerdings nehmen wir Zweckcode 2020 aus den 20ern heraus und unterteilen 2020 noch in EFH und MFH mit der Grenze bei 2 Mio. CHF.
+
+```{r}
+## Portfolio lesen
+in.file <- '../Data/gebaeudebestand_201801_zweck.csv'
+pf <- read.csv(in.file, sep = ';', stringsAsFactors = FALSE)
+## 2-stelligen Zweckcode hinzufügen
+pf$zweck2 <- floor(pf$zweckcode / 100)
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum <= 2e6)
+pf$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(pf$zweckcode == 2020 & pf$versSum > 2e6)
+pf$zweck2[ind] <- 2
+```
+
+## Durchschnittliches Alter der Gebäude
+Jetzt berechnen wir die durchschnittliche Lebensdauer der Gebäude pro 2-stelliger Zweckbestimmung seit Beginn der Schadendaten, d.h. seit 1981.
+
+```{r}
+## Lebensdauer berechnen
+pf$LebDauer <- 2018 - pmax(pf$gebBaujahr, 1981)
+
+## neue Tabelle der 2-stelligen Zweckcodes
+library(data.table)
+pf.dt <- data.table(pf)
+pf2 <- pf.dt[order(zweck2), .(Anz = .N, LebDauer = mean(LebDauer)),
+             by = zweck2]
+
+## auf Zweckcodes mit mindestens 100 Gebäuden reduzieren
+ind <- which(pf2$Anz > 99)
+if (length(ind) > 0) {
+  pf2 <- pf2[ind,]
+}
+```
+
+## Wahrscheinlichkeit eines Brandschadens oder Brandtoten
+Hier kombinieren wir die Schäden mit der durchschnittlichen Lebensdauer und berechnen die Wahrscheinlichkeit, dass ein Gebäude in einem Jahr einen Schaden grösser Null hat. Dazu wird zuerst die Anzahl Schäden durch die Anzahl Gebäude (der Zweckbestimmung) geteilt und dann mit der durchschnittlichen Lebensdauer normiert. Dies geschieht analog zu der in Teil 3 vorgestellten Analyse.
+
+Wir beschränken uns bei der Ausgabe der Ergebnisse auf jene Zweckbestimmungen, für die mindestens 100 Gebäude im Portfolio vorhanden sind. Dies soll eine solide Datengrundlage und somit robustere Aussage garantieren.
+```{r}
+## einlesen der Schadendaten
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, sep = ',', stringsAsFactors = FALSE)
+## Brandursachen extrahieren und Kategorien hinzufügen
+ursach <- data.frame(CodText = sort(unique(schad$CodTextDt))[-c(1:2)],
+                     stringsAsFactors = FALSE)
+ursach$Code <- as.integer(substr(ursach$CodText, 1, 2))
+ursach$Ursache <- substr(ursach$CodText, 4, nchar(ursach$CodText))
+## Kategorien lesen
+library(openxlsx)
+in.file <- '../Kategorien.xlsx'
+kategorien <- read.xlsx(in.file, sheet = 2)
+ursach <- merge(ursach, kategorien)
+ursach <- ursach[order(ursach$KatCode, ursach$Code),]
+tab.out <- ursach[, c('KatCode', 'Kategorie', 'Code', 'Ursache')]
+knitr::kable(tab.out, col.names = c('KatCode', 'Kategorie', 'Code', 'Ursache'),
+             row.names = FALSE, align = c('c', 'l', 'c', 'l'),
+             caption = 'Ursachen-Kategorien')
+```
+
+```{r}
+## auf die benötigten Variablen reduzieren
+schad <- schad[,c('GebaeudeBaujahr', 'zweck_code', 'SbwVerWert',
+                  'CodTextDt', 'schad_index', 'verletzte', 'todesopfer')]
+## unsinnige Ursachen-Codes entfernen
+ind <- which(schad$CodTextDt == '.' | schad$CodTextDt == '0  unbekannt')
+if (length(ind) > 0) {
+  schad <- schad[-ind,]
+}
+## 2-stelligen Zweckcode hinzufügen
+schad$zweck2 <- floor(schad$zweck_code / 100)
+## neuer 2-stelliger Zweckcode für EFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert <= 2e6)
+schad$zweck2[ind] <- 1
+## neuer 2-stelliger Zweckcode für MFH
+ind <- which(schad$zweck_code == 2020 & schad$SbwVerWert > 2e6)
+schad$zweck2[ind] <- 2
+
+## Ursachen-Kategorien hinzufügen
+schad <- merge(schad, ursach, by.x = 'CodTextDt', by.y = 'CodText')
+
+## Anzahl Schäden hinzufügen
+schad.dt <- data.table(schad)
+schad2 <- schad.dt[schad_index > 0, .(SchadAnz = .N), by = c('zweck2', 'KatCode')]
+schad2 <- schad2[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad2, all.x = TRUE)
+## Anzahl Schäden grösser 1'000 Franken
+schad3 <- schad.dt[schad_index > 1e3, .(Schad1k = .N),
+                   by = c('zweck2', 'KatCode')]
+schad3 <- schad3[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad3, by = c('zweck2', 'KatCode'), all.x = TRUE)
+## Anzahl Schäden grösser 10'000 Franken
+schad3 <- schad.dt[schad_index > 1e4, .(Schad10k = .N),
+                   by = c('zweck2', 'KatCode')]
+schad3 <- schad3[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad3, by = c('zweck2', 'KatCode'), all.x = TRUE)
+## Anzahl Schäden grösser 100'000 Franken
+schad3 <- schad.dt[schad_index > 1e5, .(Schad100k = .N),
+                   by = c('zweck2', 'KatCode')]
+schad3 <- schad3[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad3, by = c('zweck2', 'KatCode'), all.x = TRUE)
+## Anzahl Schäden grösser 1 Mio Franken
+schad3 <- schad.dt[schad_index > 1e6, .(Schad1m = .N),
+                   by = c('zweck2', 'KatCode')]
+schad3 <- schad3[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad3, by = c('zweck2', 'KatCode'), all.x = TRUE)
+
+## Anzahl Brände mit mindestens einem Toten hinzufügen
+schad2 <- schad.dt[todesopfer > 0, .(TodAnz = .N), by = c('zweck2', 'KatCode')]
+schad2 <- schad2[order(zweck2, KatCode)]
+pf2 <- merge(pf2, schad2, by = c('zweck2', 'KatCode'), all.x = TRUE)
+ind <- which(is.na(pf2$TodAnz))
+if (length(ind) > 0) {
+  pf2$TodAnz[ind] <- 0
+}
+
+## jährliche Wahrscheinlichkeit mind. eines Brandschadens
+pf2$PSchad <- 1 - pmax((1 - pf2$SchadAnz / pf2$Anz), 0)^(1/pf2$LebDauer)
+
+## jährliche Wahrscheinlichkeit Brandschaden > Grenzwert
+pf2$PSchad1k <- 1 - pmax((1 - pf2$Schad1k / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PSchad10k <- 1 - pmax((1 - pf2$Schad10k / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PSchad100k <- 1 - pmax((1 - pf2$Schad100k / pf2$Anz), 0)^(1/pf2$LebDauer)
+pf2$PSchad1m <- 1 - pmax((1 - pf2$Schad1m / pf2$Anz), 0)^(1/pf2$LebDauer)
+
+## jährliche Wahrscheinlichkeit mind. eines Brandtoten
+pf2$PTod <- 1 - pmax((1 - pf2$TodAnz / pf2$Anz), 0)^(1/pf2$LebDauer)
+
+## neue Tabelle des ehemaligen 2-stelligen Zweckcodes 20
+# tab.out <- pf2[, c('zweck2', 'KatCode')]
+# tab.out$PSchad <- sprintf("%.2f %%", 100 * pf2$PSchad)
+# tab.out$PTod <- sprintf("%.4f %%", 100 * pf2$PTod)
+# 
+# knitr::kable(tab.out, col.names = c('Zweck', 'KatCode', 'P(S > 0)', 'P(T > 0)'),
+#              align = c('c', 'c', 'r', 'r'),
+#              caption = 'Wahrscheinlichkeit von Schaden (S) und Toten (T)')
+
+## Ausgabe in 2-D Grafiken
+unique.zweck <- sort(unique(pf2$zweck2))
+unique.kat <- sort(unique(pf2$KatCode))
+pschad <- ps1k <- ps10k <- ps100k <- ps1m <- ptod <-
+  array(dim = c(length(unique.zweck), length(unique.kat)))
+
+for (i in 1:length(unique.zweck)) {
+  for (j in 1:length(unique.kat)) {
+    ind <- which(pf2$zweck2 == unique.zweck[i] & pf2$KatCode == unique.kat[j])
+    if (length(ind) == 1) {
+      pschad[i, j] <- pf2$PSchad[ind]
+      ps1k[i, j] <- pf2$PSchad1k[ind]
+      ps10k[i, j] <- pf2$PSchad10k[ind]
+      ps100k[i, j] <- pf2$PSchad100k[ind]
+      ps1m[i, j] <- pf2$PSchad1m[ind]
+      ptod[i, j] <- pf2$PTod[ind]
+    }
+  }
+}
+
+## Matrizen sortieren
+ind <- sort(apply(pschad, 1, sum, na.rm = TRUE), decreasing = TRUE,
+            index.return = TRUE)$ix
+pschad <- pschad[ind,]
+ps1k <- ps1k[ind,]
+ps10k <- ps10k[ind,]
+ps100k <- ps100k[ind,]
+ps1m <- ps1m[ind,]
+zweck.schad <- unique.zweck[ind]
+ind <- sort(apply(pschad, 2, sum, na.rm = TRUE), decreasing = TRUE,
+            index.return = TRUE)$ix
+pschad <- pschad[,ind]
+ps1k <- ps1k[,ind]
+ps10k <- ps10k[,ind]
+ps100k <- ps100k[,ind]
+ps1m <- ps1m[,ind]
+kat.schad <- unique.kat[ind]
+ind <- sort(apply(ptod, 1, sum, na.rm = TRUE), decreasing = TRUE,
+            index.return = TRUE)$ix
+ptod <- ptod[ind,]
+zweck.tod <- unique.zweck[ind]
+ind <- sort(apply(ptod, 2, sum, na.rm = TRUE), decreasing = TRUE,
+            index.return = TRUE)$ix
+ptod <- ptod[,ind]
+kat.tod <- unique.kat[ind]
+
+## Schaden-Matrix umrechnen in Anteil der Ursache an Wahrscheinlichkeit
+## eines Zweckcodes
+pschad.zweck <- pschad
+for (i in 1:nrow(pschad.zweck)) {
+  pschad.zweck[i,] <- pschad.zweck[i,] / sum(pschad.zweck[i,], na.rm = TRUE)
+}
+ps1k.zweck <- ps1k
+for (i in 1:nrow(ps1k.zweck)) {
+  ps1k.zweck[i,] <- ps1k.zweck[i,] / sum(ps1k.zweck[i,], na.rm = TRUE)
+}
+ps10k.zweck <- ps10k
+for (i in 1:nrow(ps10k.zweck)) {
+  ps10k.zweck[i,] <- ps10k.zweck[i,] / sum(ps10k.zweck[i,], na.rm = TRUE)
+}
+ps100k.zweck <- ps100k
+for (i in 1:nrow(ps100k.zweck)) {
+  ps100k.zweck[i,] <- ps100k.zweck[i,] / sum(ps100k.zweck[i,], na.rm = TRUE)
+}
+ps1m.zweck <- ps1m
+for (i in 1:nrow(ps1m.zweck)) {
+  ps1m.zweck[i,] <- ps1m.zweck[i,] / sum(ps1m.zweck[i,], na.rm = TRUE)
+}
+
+library(RColorBrewer)
+cols <- brewer.pal(9, 'YlGnBu')
+schad.breaks <- c(1e-7, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2, 1.22e-2)
+zweck.breaks <- c(0, 2e-3, 5e-3, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.7)
+zweck.breaks <- c(0, 0.01, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3, 0.5, 0.7)
+tod.breaks <- c(2e-7, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 2.8e-4)
+
+pdf.file <- 'BSV2015_PSchad-PTod_v3.pdf'
+pdf(pdf.file, paper = 'a4', width = 8, height = 11)
+layout(matrix(1:4, ncol = 2, byrow = TRUE), widths = c(8, 1.5))
+
+## Schäden > 0
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), pschad,
+      breaks = schad.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Wahrscheinlichkeit eines Brandschadens > 0', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*schad.breaks[-1]))
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), pschad.zweck,
+      breaks = zweck.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Anteil der Ursache an der Brandschadenwahrscheinlichkeit', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*zweck.breaks[-1]))
+mtext('Anteil [%]', side = 4, las = 0, line = 4)
+box()
+
+## Schäden > 1'000
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps1k,
+      breaks = schad.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = "Wahrscheinlichkeit eines Brandschadens > 1'000", line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*schad.breaks[-1]))
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps1k.zweck,
+      breaks = zweck.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Anteil der Ursache an der Brandschadenwahrscheinlichkeit', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*zweck.breaks[-1]))
+mtext('Anteil [%]', side = 4, las = 0, line = 4)
+box()
+
+## Schäden > 10'000
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps10k,
+      breaks = schad.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = "Wahrscheinlichkeit eines Brandschadens > 10'000", line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*schad.breaks[-1]))
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps10k.zweck,
+      breaks = zweck.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Anteil der Ursache an der Brandschadenwahrscheinlichkeit', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*zweck.breaks[-1]))
+mtext('Anteil [%]', side = 4, las = 0, line = 4)
+box()
+
+## Schäden > 100'000
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps100k,
+      breaks = schad.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = "Wahrscheinlichkeit eines Brandschadens > 100'000", line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*schad.breaks[-1]))
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps100k.zweck,
+      breaks = zweck.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Anteil der Ursache an der Brandschadenwahrscheinlichkeit', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*zweck.breaks[-1]))
+mtext('Anteil [%]', side = 4, las = 0, line = 4)
+box()
+
+## Schäden > 1 Mio.
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps1m,
+      breaks = schad.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = "Wahrscheinlichkeit eines Brandschadens > 1 Mio.", line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*schad.breaks[-1]))
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ps1m.zweck,
+      breaks = zweck.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(1, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.schad), 2), tick = FALSE,
+     label = as.character(zweck.schad[seq(2, length(zweck.schad), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.schad)), tick = FALSE, label = kat.schad,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Anteil der Ursache an der Brandschadenwahrscheinlichkeit', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = c(0, 100*zweck.breaks[-1]))
+mtext('Anteil [%]', side = 4, las = 0, line = 4)
+box()
+
+## Tote
+par(mar = c(4, 3, 2, 0.25), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, length(unique.zweck) + 0.5),
+     ylim = c(0.5, length(unique.kat) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(unique.zweck)), c(1:length(unique.kat)), ptod,
+      breaks = tod.breaks, col = cols, add = TRUE)
+abline(h = seq(1.5, length(unique.kat)), col = 'grey80')
+abline(v = seq(1.5, length(unique.zweck)), col = 'grey80')
+axis(1, seq(1, length(zweck.tod), 2), tick = FALSE,
+     label = as.character(zweck.tod[seq(1, length(zweck.tod), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.tod), 2), tick = FALSE,
+     label = as.character(zweck.tod[seq(2, length(zweck.tod), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.1)
+axis(2, seq(1, length(kat.tod)), tick = FALSE, label = kat.tod,
+     las = 1, cex.axis = 1, line = -0.2)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursachenkategorie', line = 1.8)
+title(main = 'Wahrscheinlichkeit eines Brandtoten', line = 0.5)
+box()
+
+par(mar = c(4, 0.25, 2, 5.5), las = 1)
+plot(0, 0, type = 'n', xlim = c(0.5, 1.5), ylim = c(0.5, length(cols)+0.5),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE)
+image(1, c(1:length(cols)), t(c(1:length(cols))),
+      breaks = seq(0.5, length(cols)+0.5), col = cols, add = TRUE)
+axis(4, seq(0.5, length(cols)+0.5), labels = 100*tod.breaks)
+mtext('Wahrscheinlichkeit [%]', side = 4, las = 0,
+      line = 4)
+box()
+
+dev.off()
+
+```
+
+## Ideen für weitere Analysen
+
+- Die gleichen 2-D Grafiken aber für Schäden, die einen gewissen Wert überschreiten (z.B. 1'000, 10'000, 100'000).  
+--> erledigt
+
+- Für jede Kombination von Zweckcode und Ursachen-Kategorie eine EP-Kurve berechnen. Alle EP-Kurven auf eine Grafik, um Ausreisser und das Verhalten der Mehrheit sehen zu können. Für jeden Zweckcode eine Grafik mit den Kurven pro Ursachen-Kategorie farblich unterschieden.  
+--> siehe Teil 5

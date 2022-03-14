@@ -1,0 +1,748 @@
+---
+title: "BSV 2025 - Brandschaden Wahrscheinlichkeit"
+author: "Mirco Heidemann"
+date: "14/01/2019"
+output: pdf_document
+---
+
+## Inhalt der Analyse
+Schätzung der Wahrscheinlichkeit pro Nutzungskategorie, dass ein Gebäude brennt und dass jemand in einem Gebäudebrand stirbt.
+Da nicht alle Gebäude im GVZ Portfolio seit Beginn der Schadenserfassung bestehen, wird pro Nutzungskategorie (GVZ Zweckcode) eine mittlere Expositionszeit berechnet.
+Für viele Zweckcodes sind nur wenige Gebäude vorhanden, weshalb im allgemeinen mit dem zweistelligen Zweckcode gearbeitet wird. Eine Ausnahme bildet der Zweckcode 2020, die Wohngebäude. Diese werden zusätzlich in Einfamilienhäuser (EFH) und Mehrfamilienhäuser (MFH) unterteilt.
+Als Vergleich zu der Brandschadenswahrscheinlichkeit wird die Schadenswahrscheinlichkeit pro Gebäude für Hagel und Sturm ermittelt.
+Die Brand- respektive Todeswahrscheinlichkeit wird zudem pro Brandursache analysiert.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(RColorBrewer)
+library(kableExtra)
+library(reshape2)
+
+## relative pfade
+data_pth = '../Data/'
+```
+
+##### Portfoliodaten: Import und wrangling
+```{r message = FALSE, cache=TRUE}
+portfolio <- read_csv2(paste0(data_pth, 'gebaeudebestand_201801_georef.csv'),
+                       locale(encoding = "iso-8859-1"), col_names = TRUE,
+                       col_types = cols_only(
+                         'objektId' = col_integer(),
+                         'zweckcode' = col_integer(),
+                         'zweckBeschr' = col_character(),
+                         'zweckKat' = col_integer(),
+                         'versSum' = col_number(),
+                         'volumen' = col_number(),
+                         'gebBaujahr' = col_integer()
+                       )) %>% 
+  mutate(zweckcode_zweistlg = as.integer(zweckcode/100),
+         zweck = ifelse(zweckcode == 2020 & versSum <= 2e6, 1,
+                        ifelse(zweckcode == 2020 & versSum > 2e6, 2,
+                               zweckcode_zweistlg))) %>% 
+  rename(zweckcode_einstlg = zweckKat)
+```
+
+Anzahl Gebäude, Versicherungssumme und gemittelte Expositionszeit pro zweistelligem Zweckcode sowie die Kategorien EFH und MFH.
+Unterteilung nach EFM (neuer Zweckcode "1") und MFH (neuer Zweckcode "2"): Wohngebäude (Zweckcode 2020) mit einer Versicherungssumme bi 2 Mio. gelten als EHM, Wohngebäude mit einer Versicheurngssumme von über 2 Mio. als MFH.
+
+```{r}
+tbl_zweck <- portfolio %>% 
+  group_by(zweck) %>% 
+  summarize(geb_anzahl = n(),
+            vers_sum = sum(versSum)/1e6,
+            volumen = sum(volumen))
+
+knitr::kable(tbl_zweck,
+             col.names = c('Zweck', 'Anzahl Gebäude', 'Versicherungssumme [Mio.]',
+                           'Volumen'),
+             align = c('c', 'r', 'r', 'r'), digits = c(0, 0, 0, 0),
+             format.args = list(big.mark = "'"),
+             caption = 'Verteilung der Zweckbestimmungen')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+Expositionszeit der Gebäude seit Beginn der Schadenerfassung d.h. seit 1981. Die durchschnittliche Expositionszeit wird zudem gemäss der BSV Generation in "vor 1993" und "nach 1993" unterteilt. Mit einer angenommenen Wirkungszeit einer neuen BSV von zwei Jahren, ergibt sich eine Unterteilung "vor 1995" und "nach 1995".
+
+```{r}
+tbl_expo_vor_95 <- portfolio %>%
+  filter(gebBaujahr <= 1995) %>% 
+  mutate(expo_vor_95 = max(portfolio$gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(anzahl_vor_95 = n(),
+            expo_vor_95 = mean(expo_vor_95))
+
+tbl_expo_nach_95 <- portfolio %>%
+  filter(gebBaujahr > 1995) %>% 
+  mutate(expo_nach_95 = max(portfolio$gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(anzahl_nach_95 = n(),
+            expo_nach_95 = mean(expo_nach_95))
+
+tbl_expo <- portfolio %>% 
+  mutate(exposition = max(gebBaujahr) - pmax(gebBaujahr, 1981)) %>% 
+  group_by(zweck) %>% 
+  summarize(geb_anzahl = n(),
+            exposition = mean(exposition)) %>% 
+  left_join(tbl_expo_vor_95, by = "zweck") %>%
+  left_join(tbl_expo_nach_95, by = "zweck")
+
+knitr::kable(tbl_expo,
+             col.names = c('Zweck', 'Anzahl', 'Expo.',
+                           'Anzahl vor 1995', 'Expo. vor 1995',
+                           'Anzahl nach 1995', 'Expo. nach 1995'),
+             align = c('c', 'r', 'c', 'r', 'c', 'r', 'c'),
+             digits = c(0, 0, 1, 0, 1, 0, 1),
+             format.args = list(big.mark = "'"),
+             caption = 'Mittlere Schadensexposition')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+## Wahrscheinlichkeit eines Feuerschadens oder Brandtoten
+Anhand der Schadendaten in GemDat wird die jährliche Wahrscheinlichkeit berechnet, dass ein Gebäude brennt und dass Menschen in einem Gebäudebrand zu Tode kommen.
+
+Dazu wird zuerst die Anzahl Brandschäden durch die Anzahl Gebäude der jeweiligen Zweckbestimmung geteilt und dann mit einer durchschnittlichen Schadensexpositionszeit normiert. nJahre steht dabei für die durchschnittliche Schadensexpositionszeit (in Jahre) der Gebäude pro Nutzungsklasse.
+
+$$P_{S>0}^{nJahre} = \frac{N_{S>0}^{nJahre}} {N_{Total}}$$
+$$P_{S>0}^{1 Jahr} = 1-\big(1-P_{S>0}^{n Jahre}\big)^{1/nJahre}$$
+
+##### Schadendaten: Import und wrangling:
+- Daten zu Gebäudeschäden und Brandtoten laden
+- Nur Schäden zwischen 1981 und 2018
+- Doppelte Schaden ID nur einmal verwenden
+
+```{r message = FALSE, cache=TRUE}
+
+brandopfer <- read_csv2(paste0(data_pth, 'gvz_schaeden_mit_brandopfern_201812.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'), Ausdr3 < 2018) %>% 
+  rename(verletzte = SchadenVerletzte, todesopfer = SchadenTodesopfer) %>% 
+  dplyr::select(c(2, 22:23))
+
+# Schadendaten laden und filtern: GVZ Schäden zwischen 1982 und 2017
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>%
+  mutate(schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", GebaeudeZweckText)),
+                                       "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_zweistlg = as.integer(str_sub(zweckcode, 1, 2)),
+         zweckcode_einstlg = as.integer(str_sub(zweckcode, 1, 1)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+"))) %>% 
+    ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE) %>% 
+    left_join(brandopfer, by = c('SchadenId' = 'SchadenId')) %>% 
+  # Annahme: NA's in Todesopfer = 0
+  mutate(todesopfer = ifelse(is.na(todesopfer), 0, todesopfer),
+         verletzte = ifelse(is.na(verletzte), 0, verletzte)) %>% 
+  select(GebaeudeId, SchadenId, SchadenDatum, Ausdr3, SchadenArtBezeichnung, SbwVerWert,
+         SchadenSumme, schadensatz, GebaeudeBaujahr, zweck, zweckcode, zweckcode_zweistlg, 
+         zweckcode_einstlg, schadenursache, schadencode, verletzte, todesopfer)
+
+# Entferne nicht weiter benötigter Datensatz
+rm(brandopfer)
+```
+
+Berechnung der W'keit über die gemittelte Expositionszeit pro Zweckcode für einen Gebäudebrandschaden grösser Null und einem Brandtoten in einem Gebäudebrand. Es werden nur Zweckcodes mit mindestens 100 Gebäude im Portfolio vor und nach 1995 berücksichtigt.
+
+```{r}
+schad <- schad %>% 
+  # Zweckcodekategorien füer EFH und MFH
+  mutate(zwck = ifelse(zweckcode == 2020 & SbwVerWert <= 2e6, 1,
+                        ifelse(zweckcode == 2020 & SbwVerWert > 2e6, 2,
+                               zweckcode_zweistlg))) %>% 
+  # nur schäden grösser Null
+  filter(SchadenSumme > 0,
+         # Wenn Ursache "unbekannt" oder ".", dann entfernen
+         !is.na(schadencode) & schadencode > 0)
+
+# Feuerschaden W'keit vor 1995
+tbl_feuer_vor95 <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         GebaeudeBaujahr <= 1995) %>% 
+  group_by(zwck) %>% 
+  summarize(schad_anzahl_vor95 = n(),
+            todesopfer_vor95 = sum(todesopfer)) %>%
+  left_join(select(tbl_expo, zweck, anzahl_vor_95, expo_vor_95), by = c("zwck" = "zweck")) %>% 
+  mutate(p_schad_vor95 = 1 - pmax((1 - schad_anzahl_vor95 / anzahl_vor_95), 0) ^ (1/expo_vor_95),
+         p_tod_vor95 = 1 - pmax((1 - todesopfer_vor95 / anzahl_vor_95), 0) ^ (1/expo_vor_95),
+         p_schad_vor95 = sprintf("%0.2f %%", 100 * p_schad_vor95),
+         p_tod_vor95 = sprintf("%0.4f %%", 100 * p_tod_vor95)) %>% 
+  select(zwck, p_schad_vor95, p_tod_vor95)
+
+# Feuerschaden W'keit nach 1995
+tbl_feuer_nach95 <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         GebaeudeBaujahr > 1995) %>% 
+  group_by(zwck) %>% 
+  summarize(schad_anzahl_nach95 = n(),
+            todesopfer_nach95 = sum(todesopfer)) %>% 
+  left_join(select(tbl_expo, zweck, anzahl_nach_95, expo_nach_95), by = c("zwck" = "zweck")) %>% 
+  mutate(p_schad_nach95 = 1 - pmax((1 - schad_anzahl_nach95 / anzahl_nach_95), 0) ^ (1/expo_nach_95),
+         p_tod_nach95 = 1 - pmax((1 - todesopfer_nach95 / anzahl_nach_95), 0) ^ (1/expo_nach_95),
+         p_schad_nach95 = sprintf("%0.2f %%", 100 * p_schad_nach95),
+         p_tod_nach95 = sprintf("%0.4f %%", 100 * p_tod_nach95)) %>% 
+  select(zwck, p_schad_nach95, p_tod_nach95)
+
+# Feuerschaden W'keit
+tbl_feuer <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer')) %>% 
+  group_by(zwck) %>% 
+  summarize(schad_anzahl = n(),
+            todesopfer = sum(todesopfer)) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  mutate(p_schad = 1 - pmax((1 - schad_anzahl / geb_anzahl), 0) ^ (1/exposition),
+         p_tod = 1 - pmax((1 - todesopfer / geb_anzahl), 0) ^ (1/exposition),
+         p_schad = sprintf("%0.2f %%", 100 * p_schad),
+         p_tod = sprintf("%0.4f %%", 100 * p_tod)) %>% 
+  select(zwck, p_schad, p_tod, schad_anzahl, geb_anzahl)
+
+tbl_feuer_select <- tbl_feuer %>% 
+  left_join(tbl_feuer_vor95, by = "zwck") %>% 
+  left_join(tbl_feuer_nach95, by = "zwck") %>%
+  left_join(tbl_expo_vor_95, c("zwck" = "zweck")) %>% 
+  left_join(tbl_expo_nach_95, c("zwck" = "zweck")) %>% 
+  filter(anzahl_vor_95 > 99 & anzahl_nach_95 > 99) %>% 
+  select(zwck, p_schad, p_schad_vor95, p_schad_nach95, p_tod, p_tod_vor95, p_tod_nach95)
+
+knitr::kable(tbl_feuer_select,
+             col.names = c('Zweck', 'P(S > 0)', 'P(S > 0) vor 95', 'P(S > 0) nach 95',
+                           'P(T > 0)', 'P(T > 0) vor 95', 'P(S > 0) nach 95'),
+             align = c('c', 'r', 'r', 'r', 'r', 'r', 'r'),
+             caption = 'Wahrscheinlichkeit von Schaden und Todesopfern')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+Interpretation: Ausser in den Zweckcodes 21, 25 und 26, respektive "Wohngebäude mit Büro oder anderen Lokalen", "Wohngebäude mit Handelsteil" und "Wohngebäude mit Gewerbebetrieben" ist die Brandwahrscheinlichkeit nach 1995 kleiner oder gleich gegenüber 1995.
+
+##### Wahrscheinlichkeit für Hagel- und Sturmschäden
+Berechnung der W'keit über die gemittelte Expositionszeit pro Zweckcode für einen Hagel- und Sturmschaden grösser Null. Es werden nur Zweckcode mit mindestens 100 Gebäude im Portfolio berücksichtigt.
+ 
+```{r}
+# Hagelschaden W'keit
+tbl_hagel <- schad %>% filter(str_detect(schadenursache, 'Hagel')) %>% 
+  group_by(zwck) %>% 
+  summarize(schadenanzahl = n()) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  mutate(p_schad = 1 - (1 - schadenanzahl / geb_anzahl) ^ (1/exposition),
+         p_schad = sprintf("%0.2f %%", p_schad * 100)) %>% 
+  filter(geb_anzahl > 99) %>% 
+  select(zwck, p_schad)
+```
+
+```{r}
+# Sturmschaden W'keit
+tbl_sturm <- schad %>% filter(str_detect(schadenursache, 'Sturm')) %>% 
+  group_by(zwck) %>% 
+  summarize(schadenanzahl = n()) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  mutate(p_schad = 1 - (1 - schadenanzahl / geb_anzahl) ^ (1/exposition),
+         p_schad = sprintf("%0.2f %%", p_schad * 100)) %>% 
+  filter(geb_anzahl > 99) %>% 
+  select(zwck, p_schad)
+```
+
+```{r}
+tbl_p <- tbl_zweck %>% 
+  left_join(select(tbl_feuer, zwck, p_schad), c("zweck" = "zwck")) %>% 
+  rename(p_schad_feuer = p_schad) %>% 
+  left_join(select(tbl_hagel, zwck, p_schad), c("zweck" = "zwck")) %>% 
+  rename(p_schad_hagel = p_schad) %>% 
+  left_join(select(tbl_sturm, zwck, p_schad), c("zweck" = "zwck")) %>% 
+  rename(p_schad_sturm = p_schad) %>% 
+  filter(geb_anzahl > 99) %>% 
+  select(zweck, p_schad_feuer, p_schad_hagel, p_schad_sturm)
+
+knitr::kable(tbl_p,
+             col.names = c('Zweck', 'P(Feuerschad > 0)', 'P(Hagelschad > 0)', 'P(Sturmschad > 0)'),
+             align = c('c', 'r'),
+             caption = 'Brand-, Hagel- und Sturmschaden Wahrscheinlichkeit pro Zweckcode')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+## Analyse nach der Brandursache
+Ursache "unbekannt" oder "." werden nicht berücksichtigt.
+```{r}
+tbl_ursache <- schad %>% 
+  filter(SchadenArtBezeichnung == "Feuer") %>% 
+  group_by(schadencode, schadenursache) %>% 
+  summarize(schad_anzahl = n(),
+            schad_sum = sum(SchadenSumme),
+            todesopfer = sum(todesopfer))
+
+knitr::kable(tbl_ursache,
+             col.names = c('Schadencode', 'Schadenursache', 'Anzahl Schäden',
+                           'Schadensumme', 'Todesopfer'),
+             align = c('c', 'l', 'r', 'r', 'r'), digits = c(0, 0, 0, 0, 0),
+             format.args = list(big.mark = "'"),
+             caption = 'Verteilung der Brandursache')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>% 
+  column_spec(2, width = "20em")
+```
+
+##### Zusammenfassung der Brandursachen nach Kategorien
+Kriterieum: Änlichkeit in der Brandauslösung
+```{r message = FALSE, cache=TRUE}
+ursache_kat <- read_csv2(paste0(data_pth, 'brandursache_kategorien.csv'),
+                       locale(encoding = "iso-8859-1"),
+                       col_names = TRUE,
+                       col_types = NULL)
+
+tbl_ursachekat <- tbl_ursache %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  arrange(KatCode)
+
+knitr::kable(select(tbl_ursachekat, schadencode, schadenursache, KatCode, Kategorie),
+             col.names = c('Schadencode', 'Schadenursache', 'Kategorie Code',
+                           'Kategorie'),
+             align = c('c', 'l', 'c', 'l'), digits = c(0, 0, 0, 0),
+             caption = 'Brandursachen Kategorien')%>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>% 
+  column_spec(2, width = "20em")
+```
+
+Matrix-Heatplot der Brandschäden (Anzahl Schäden und Schadensumme) nach Brandursache (y-Achse) und zweistelligem Zweckcode (x-Achse). Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+
+```{r}
+schadanzahl_spread <- schad %>% 
+  filter(SchadenArtBezeichnung == "Feuer") %>% 
+  select(SchadenSumme, zwck, schadencode) %>% 
+  group_by(zwck, schadencode) %>% 
+  summarize(schad_anzahl = n()) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  filter(geb_anzahl > 99) %>% 
+  select(zwck, schadencode, schad_anzahl) %>% 
+  spread(zwck, schad_anzahl)
+
+schadanzahl_melt <- melt(schadanzahl_spread, id = "schadencode") %>% 
+  arrange(variable, value) %>% 
+  mutate(value = ifelse(is.na(value), 0, value),
+         variable = factor(variable, levels = unique(variable)),
+         schadencode = factor(schadencode),
+         #create a new variable from value
+         value_fact = cut(value,
+                          breaks = c(-1, 0, 10, 25, 50, 100,
+                                     250, 500, max(value, na.rm=T)),
+                          labels=c("0", "10", "25", "50",
+                                   "100", "250", "500", "> 500")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+theme_set(theme_bw(base_size = 8))
+textcol <- "grey40"
+
+ggplot(data = schadanzahl_melt, aes(x = variable, y = schadencode, fill = value_fact)) +
+  geom_tile() +
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Schadenanzahl nach Brandursache und Zweck", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  ylab("Schadencode") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0))+
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0))+
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(7,"YlGnBu")), "#f0f0f0"), na.value="grey90")+
+  #theme options
+  theme(
+    #remove legend title
+    legend.title=element_blank(),
+    #remove legend margin
+    #legend.margin = grid::unit(0,"cm"),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+
+```
+
+```{r}
+schadSum_spread <- schad %>% 
+  filter(SchadenArtBezeichnung == "Feuer") %>% 
+  select(SchadenSumme, zwck, schadencode) %>% 
+  group_by(zwck, schadencode) %>% 
+  summarize(schad_sum = sum(SchadenSumme)) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  filter(geb_anzahl > 99) %>% 
+  select(zwck, schadencode, schad_sum) %>% 
+  spread(zwck, schad_sum)
+
+schadSum_melt <- melt(schadSum_spread, id = "schadencode") %>% 
+  arrange(variable, value) %>% 
+  mutate(value = ifelse(is.na(value), 0, value),
+         variable = factor(variable, levels = unique(variable)),
+         schadencode = factor(schadencode),
+         #create a new variable from value
+         value_fact = cut(value,
+                          # breaks = c(-1, 0, 5e4, 1e5, 5e5, 1e6,
+                          #            5e6, 10e6, max(value, na.rm=T)),
+                           breaks = c(-1, 0, 2.5e5, 5e5, 1e6, 2.5e6,
+                                     5e6, 10e6, max(value, na.rm=T)),
+                          labels=c("0", "250'000", "500'000", "1 Mio.",
+                                   "2.5 Mio.", "5 Mio.", "10 Mio.", "> 10 Mio.")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+theme_set(theme_bw(base_size = 8))
+textcol <- "grey40"
+
+ggplot(data = schadSum_melt, aes(x = variable, y = schadencode, fill = value_fact)) +
+  geom_tile() +
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Schadensumme nach Brandursache und Zweck", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  ylab("Schadencode") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0))+
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0))+
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(7,"YlGnBu")), "#f0f0f0"), na.value="grey90")+
+  #theme options
+  theme(
+    #remove legend title
+    legend.title=element_blank(),
+    #remove legend margin
+    #legend.margin = grid::unit(0,"cm"),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+
+```
+
+#### Wahrscheinlichkeit eines Brandschadens
+Nach Brandschaden Kategorien. Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+```{r}
+schadwkeit_spread <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer')) %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>%
+  group_by(zwck, Kategorie) %>% 
+  summarize(schad_anzahl = n(),
+            todesopfer = sum(todesopfer)) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  filter(geb_anzahl > 99) %>% 
+  mutate(p_schad = 1 - pmax((1 - schad_anzahl / geb_anzahl), 0) ^ (1/exposition),
+         p_tod = 1 - pmax((1 - todesopfer / geb_anzahl), 0) ^ (1/exposition)) %>% 
+  select(zwck, Kategorie, p_schad) %>% 
+  spread(zwck, p_schad)
+
+schadwkeit_melt <- melt(schadwkeit_spread, id = "Kategorie") %>% 
+  arrange(variable, value) %>% 
+  mutate(value = ifelse(is.na(value), 0, value),
+         # Kategorie = factor(Kategorie, levels = unique(Kategorie)),
+         variable = factor(variable, levels = unique(variable)),
+         #create a new variable from value
+         value_fact = cut(value * 100,
+                          breaks = c(-1, 0, 0.005, 0.01, 0.05, 0.1, 0.5,
+                                     1, max(value, na.rm=T)*100),
+                          labels=c("0", "0.005", "0.01", "0.05", "0.1",
+                                   "0.5", "1", "> 1")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+ggplot(data = schadwkeit_melt, aes(x = variable, y = Kategorie, fill = value_fact)) +
+  geom_tile()+
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Wahrscheinlichkeit eines Brandschadens [%]", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  ylab("Brandursachen Kategorie") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0))+
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0))+
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(7,"YlGnBu")), "#f0f0f0"), na.value="grey90")+
+  #theme options
+  theme(
+    #remove legend title
+    legend.title=element_blank(),
+    #remove legend margin
+    legend.margin=margin(t = 0, unit='cm'),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+```
+
+#### Wahrscheinlichkeit eines Brandtoten
+Nach Brandschaden Kategorien. Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+```{r}
+todeswkeit_spread <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer')) %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>%
+  group_by(zwck, Kategorie) %>% 
+  summarize(schad_anzahl = n(),
+            todesopfer = sum(todesopfer)) %>% 
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  filter(geb_anzahl > 99) %>% 
+  mutate(p_schad = 1 - pmax((1 - schad_anzahl / geb_anzahl), 0) ^ (1/exposition),
+         p_tod = 1 - pmax((1 - todesopfer / geb_anzahl), 0) ^ (1/exposition)) %>% 
+  select(zwck, Kategorie, p_tod) %>% 
+  spread(zwck, p_tod)
+
+todeswkeit_melt <- melt(todeswkeit_spread, id = "Kategorie") %>% 
+  arrange(variable, value) %>% 
+  mutate(value = ifelse(is.na(value), 0, value),
+         # Kategorie = factor(Kategorie, levels = unique(Kategorie)),
+         variable = factor(variable, levels = unique(variable)),
+         #create a new variable from value
+         value_fact = cut(value * 100,
+                          breaks = c(-1, 0, 1e-5, 1e-4, 5e-04, 0.001,
+                                     0.005, 0.02, max(value, na.rm=T)*100),
+                          labels=c("0", "1e-5", "1e-4", "5e-04", "0.001", "0.005",
+                                   "0.02", "> 0.02")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+ggplot(data = todeswkeit_melt, aes(x = variable, y = Kategorie, fill = value_fact)) +
+  geom_tile() +
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Wahrscheinlichkeit eines Brandtoten [%]", 
+       subtitle = "", 
+       caption = "Quelle: GVZ") +
+  ylab("Brandursachen Kategorie") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0)) +
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0)) +
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(6,"YlGnBu")), "#f0f0f0"), na.value="grey90") +
+  #theme options
+  theme(
+    #remove legend title
+    legend.title=element_blank(),
+    #remove legend margin
+    #legend.margin = grid::unit(0,"cm"),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+```
+
+#### Bedingte Wahrscheinlichkeit
+Anteil der Ursache an der Brandwahrscheinlichkeit:
+Wenn es in einem Zweckcode X brennt, wie hoch ist die Wahrscheinlichkeit, dass die Kategorie Y den Brand verursacht hat?
+```{r}
+condP_schad <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer')) %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  group_by(zwck) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  filter(geb_anzahl > 99) %>% 
+  select(zwck, Kategorie) %>% # w'keiten über die Kategorien summieren sich zu eins
+  table() %>%
+  prop.table(1)
+
+condP_schad <- as.data.frame(condP_schad) %>% 
+  arrange(zwck, Freq) %>% 
+  mutate(Freq = ifelse(is.na(Freq), 0, Freq),
+         # Kategorie = factor(Kategorie, levels = unique(Kategorie)),
+         zwck = factor(zwck, levels = unique(zwck)),
+         #create a new variable from value
+         value_fact = cut(Freq,
+                          breaks = c(-1, 0, 0.01, 0.05, 0.1, 0.25,
+                                     0.5, 0.75, 1),
+                          labels=c("0", "0.01", "0.05", "0.1", "0.25", "0.5",
+                                   "0.75", "1")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+ggplot(data = condP_schad, aes(x = zwck, y = Kategorie, fill = value_fact)) +
+  geom_tile() +
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Anteil der Ursache an der Brandwahrscheinlichkeit", 
+       subtitle = "Bedingte Schadenswahrscheinlichkeit", 
+       caption = "Quelle: GVZ") +
+  ylab("Brandursachen Kategorie") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0)) +
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0)) +
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(6,"YlGnBu")), "#f0f0f0"), na.value="grey90",
+                    name="Anteil") +
+  #theme options
+  theme(
+    #remove legend title
+    # legend.title=element_blank(),
+    #remove legend margin
+    #legend.margin = grid::unit(0,"cm"),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+```
+
+Anteil der Ursache an der Wahrscheinlichkeit für einen Brandtoten:
+Wenn es in einem Zweckcode X brennt, wie hoch ist die Wahrscheinlichkeit, dass die Kategorie Y den Brand verursacht hat?
+```{r}
+condP_tot <- schad %>%
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer') & todesopfer > 0) %>% 
+  left_join(select(ursache_kat, -Ursache), by = c('schadencode' = 'Code')) %>% 
+  group_by(zwck) %>% 
+  # Nur Zweckcodes mit mindestens 100 Gebäude im Portfolio.
+  left_join(select(tbl_expo, zweck, geb_anzahl, exposition), by = c("zwck" = "zweck")) %>% 
+  filter(geb_anzahl > 99) %>% 
+  select(Kategorie) %>% # w'keiten über die Kategorien summieren sich zu eins
+  table() %>%
+  prop.table(1)
+
+condP_tot <- as.data.frame(condP_tot) %>% 
+  arrange(zwck, Freq) %>% 
+  mutate(Freq = ifelse(is.na(Freq), 0, Freq),
+         # Kategorie = factor(Kategorie, levels = unique(Kategorie)),
+         zwck = factor(zwck, levels = unique(zwck)),
+         #create a new variable from value
+         value_fact = cut(Freq,
+                          breaks = c(-1, 0, 0.1, 0.25, 
+                                     0.5, 0.75, 1),
+                          labels=c("0", "0.1", "0.25", 
+                                    "0.5", "0.75", "1")),
+         value_fact = factor(value_fact, levels = rev(levels(value_fact))))
+```
+
+```{r}
+ggplot(data = condP_tot, aes(x = zwck, y = Kategorie, fill = value_fact)) +
+  geom_tile() +
+  #redrawing tiles to remove cross lines from legend
+  geom_tile(colour="white",size=0.25)+
+  labs(title = "Anteil der Ursache an der Brandwahrscheinlichkeit", 
+       subtitle = "Bedingte Wahrscheinlichkeit eines Brandtoten", 
+       caption = "Quelle: GVZ") +
+  ylab("Brandursachen Kategorie") + xlab("Zweckcode") +
+  #remove extra space
+  scale_y_discrete(expand=c(0,0)) +
+  #custom breaks on x-axis
+  scale_x_discrete(expand=c(0,0)) +
+  #custom colours for cut levels and na values
+  scale_fill_manual(values = c(rev(brewer.pal(5,"YlGnBu")), "#f0f0f0"), na.value="grey90",
+                    name="Anteil") +
+  #theme options
+  theme(
+    #remove legend title
+    #legend.title=element_blank(),
+    #remove legend margin
+    #legend.margin = grid::unit(0,"cm"),
+    #change legend text properties
+    legend.text=element_text(colour=textcol,size=7,face="bold"),
+    #change legend key height
+    legend.key.height=grid::unit(0.8,"cm"),
+    #set a slim legend
+    legend.key.width=grid::unit(0.3,"cm"),
+    #set x axis text size and colour
+    axis.text.x=element_text(colour=textcol, angle = 60, hjust = 1),
+    #set y axis text colour and adjust vertical justification
+    axis.text.y=element_text(vjust = 0.2,colour=textcol),
+    #change axis ticks thickness
+    axis.ticks.x=element_line(size=0.4),
+    axis.ticks.y=element_blank(),
+    #change title font, size, colour and justification
+    plot.title=element_text(colour=textcol,hjust=0,size=14,face="bold"),
+    #remove plot background
+    plot.background=element_blank(),
+    #remove plot border
+    panel.border=element_blank())
+```

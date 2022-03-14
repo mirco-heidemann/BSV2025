@@ -1,0 +1,296 @@
+---
+title: "BSV2025"
+author: "Jan Kleinn"
+date: "14.12.2018"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+### von Mirco zusammengestellte Daten einlesen
+
+```{r}
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, stringsAsFactors = FALSE)
+```
+
+### EP-Kurven erstellen
+
+```{r}
+## Daten vor und nach Einführung BSV definieren (<1993, >1995)
+ind93 <- which(schad$GebaeudeBaujahr < 1993)
+ind95 <- which(schad$GebaeudeBaujahr > 1995)
+## Anzahl Jahre berechnen
+nyrs <- max(schad$Ausdr3) - min(schad$Ausdr3) + 1
+## Wiederkehrperioden definieren
+wkp.all <- (nyrs + 1) / c(1:nrow(schad))
+wkp.93 <- (nyrs + 1) / c(1:length(ind93))
+wkp.95 <- (nyrs + 1) / c(1:length(ind95))
+
+## Plot vorbereiten
+xmin <- 0.1
+xmax <- 40
+ymin <- 0
+ymax <- 12e6
+leg.txt <- c('alle Daten', 'Baujahr < 1993', 'Baujahr > 1995')
+
+## Grafik erstellen
+plot(1, 1, type = 'n', xlim = c(xmin, xmax), ylim = c(ymin, ymax),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE, log = 'x')
+abline(h = seq(ymin, ymax, 1e6), col = 'grey80')
+abline(v = c(seq(0.1, 1, 0.1), seq(2, 10, 1), seq(20, 40, 10)),
+       col = 'grey80')
+abline(h = c(5e6, 10e6), col = 'grey60')
+abline(v = c(0.1, 1, 10), col = 'grey60')
+points(wkp.93, schad$schad_index[ind93], col = 'red3', lwd = 2)
+points(wkp.95, schad$schad_index[ind95], col = 'blue', lwd = 2)
+points(wkp.all, schad$schad_index, lwd = 2)
+legend('topleft', leg.txt, col = c('black', 'red3', 'blue'),
+       lwd = 2, bg = 'white', box.col = 'grey60')
+title(xlab = 'Wiederkehrperiode')
+title(ylab = 'Schaden [mio CHF]')
+axis(1, c(seq(0.1, 1, 0.1), seq(2, 10, 1), seq(20, 40, 10)),
+     labels = FALSE)
+axis(1, c(0.1, 0.2, 0.5))
+axis(1, c(1, 2, 5, 10, 20))
+axis(2, seq(ymin, ymax, 1e6), labels = FALSE)
+axis(2, seq(ymin, ymax, 5e6), labels = seq(ymin, ymax, 5e6)/1e6,
+     las = 1)
+box()
+```
+
+### Brandwahrscheinlichkeit pro Gebäude
+Die bisherige Betrachtung ist für das gesamte Portfolio der GVZ. Interessanter ist aber, wie die Wahrscheinlichkeit eines Brandschadens eines Gebäudes aussieht.  
+In einem ersten Schritt wird das für das gesamte Portfolio berechnet, danach sollte es für einzelne Zweckcodes wiederholt werden, sofern in der jeweiligen Kategorie genügend Daten vorhanden sind. Man könnte die Einteilung auch danach ausrichten, welche Zweckcodes in den BSV zusammengefasst sind.  
+Die Wahrscheinlichkeit, dass ein Gebäude innerhalb der `r nyrs` Jahre mindestens einen Schaden grösser Null hat, kann aus dem Vergleich der Anzahl Schäden in der Zeit und der Gesamtzahl Gebäude berechnet werden:
+$$P_{S>0}^{n Jahre} = \frac{N_{S>0}^{n Jahre}} {N_{Total}}$$  
+Um diese Wahrscheinlichkeit auf ein einziges Jahr umzurechnen folgen wir dem gleichen Ansatz, wie die Berechnung der Wahrscheinlichkeit eines x-jährlichen Ereignisses in y Jahren, nur umgekeht:
+$$P_{S>0}^{1 Jahr} = 1-\big(1-P_{S>0}^{n Jahre}\big)^{1/n}$$  
+Analog kann die Wahrscheinlichkeit für eine Schaden einer bestimmten Höhe berechnet werden. Allerdings macht es hier mehr Sinn, den Schadengrad (SG) zu verwenden, damit die Geäbude mit ihrer Versicherungssumme normiert sind:
+$$P_{SG>x}^{1 Jahr} = 1-\big(1-P_{SG>x}^{n Jahre}\big)^{1/n}$$  
+Für sämtliche Gebäude im Kanton Zürich, für die Daten des Schadengrades vorhanden sind, sieht dies mit der Annahme von 290'680 Gebäuden im Kanton Zürich (GVZ Geschäftsbericht 2017) folgendermassen aus:  
+```{r}
+## Anzahl Gebäude definieren
+ngeb <- 290680
+## Schadengrad sortiert extrahieren
+sg <- sort(schad$schad_ratio, decreasing = TRUE)
+## Unendlich grosse Werte herausnehmen
+ind <- which(is.finite(sg))
+sg <- sg[ind]
+## Wahrscheinlichkeit berechnen
+p.all <- 1 - (1 - (c(1:length(sg)) / ngeb))^(1/nyrs)
+## Wahrscheinlichkeit in % umwandeln
+p.all <- 100 * p.all
+
+## Plot vorbereiten
+xmin <- 1e-4
+xmax <- 1
+ymin <- 0
+ymax <- 1.5
+
+plot(1, 1, type = 'n', xlim = c(xmin, xmax), ylim = c(ymin, ymax),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE, log = 'x')
+abline(h = seq(ymin, ymax, 0.1), col = 'grey80')
+abline(v = c(seq(1e-4, 9e-4, 1e-4), seq(1e-3, 9e-3, 1e-3),
+             seq(0.01, 0.1, 0.01), seq(0.2, 1, 0.1)),
+       col = 'grey80')
+abline(h = seq(ymin, ymax, 0.5), col = 'grey60')
+abline(v = c(1e-4, 1e-3, 0.01, 0.1), col = 'grey60')
+abline(v = max(p.all), col = 'red')
+points(p.all, sg)
+title(xlab = 'Überschreitenswahrscheinlichkeit [%]')
+title(ylab = 'Schadengrad [%]')
+axis(1, c(seq(1e-4, 9e-4, 1e-4), seq(1e-3, 9e-3, 1e-3),
+          seq(0.01, 0.1, 0.01),seq(0.2, 1, 0.1)),
+     labels = FALSE)
+axis(1, c(1e-5, 1e-4, 1e-3))
+axis(1, c(0.01, 0.02, 0.05))
+axis(1, c(0.1, 0.2, 0.5))
+axis(1, 1)
+axis(2, seq(ymin, ymax, 0.1), labels = FALSE)
+axis(2, seq(ymin, ymax, 0.5), labels = 100*seq(ymin, ymax, 0.5),
+     las = 1)
+box()
+
+```
+
+Die jährliche Wahrscheinlichkeit eines Gebäudes, einen Brandschaden grösser als Null zu erleiden, ist somit `r round(max(p.all), digits = 2)`% (rote Linie).
+In 50 Jahren Lebensdauer des Gebäudes ist das eine Wahrscheinlichkeit von `r round(100*(1-(1-max(p.all/100))^50), digits = 0)`%.
+Dies entspricht einem `r round(100/max(p.all), digits = 0)`-jährlichen Ereignis.  
+Im Anhang vom Geschäftsbericht 2017 der GVZ finden wir auch die Anzahl Gebäude pro Zweckbestimmung, zumindest für die erste Stelle.  
+
+```{r}
+zweck <- data.frame(name = c('Verwaltung', 'Wohnen', 'Landwirtschaft',
+                             'Verkehr', 'Handel', 'Industrie & Gewerbe',
+                             'Gastgewerbe', 'Nebengebäude'),
+                    code = c(1, 2, 3, 4, 5, 6, 8, 9),
+                    number = c(11249, 191174, 22394, 1642, 1225,
+                               12227, 577, 50192),
+                    num = numeric(8),
+                    p.max = numeric(8),
+                    stringsAsFactors = FALSE)
+ep <- data.frame(ep = 10^seq(-4, 1, 2e-3))
+for (i in 1:nrow(zweck)) {
+  if (i == nrow(zweck)) {
+    ind <- which(floor(schad$zweck_code/1000) == zweck$code[i])
+  } else {
+    ind <- which(floor(schad$zweck_code/1000) >= zweck$code[i] &
+                   floor(schad$zweck_code/1000) < zweck$code[i+1])
+  }
+  ## Anzahl Gebäude definieren
+  ngeb <- zweck$number[i]
+  ## Schadengrad sortiert extrahieren
+  sg <- sort(schad$schad_ratio[ind], decreasing = TRUE)
+  ## Unendlich grosse Werte herausnehmen
+  ind.f <- which(is.finite(sg))
+  sg <- sg[ind.f]
+  ## Wahrscheinlichkeit berechnen
+  p.all <- 1 - (1 - (c(1:length(sg)) / ngeb))^(1/nyrs)
+  ## Wahrscheinlichkeit in % umwandeln
+  p.all <- 100 * p.all
+  ## Anzal Schaeden pro Kategorie
+  zweck$num[i] <- length(ind.f)
+  
+  zweck$p.max[i] <- max(p.all)
+  ep <- cbind(ep, approx(p.all, sg, ep$ep)$y)
+}
+
+## Plot vorbereiten
+xmin <- 1e-4
+xmax <- 5
+ymin <- 0
+ymax <- 1.5
+cols <- rainbow(nrow(zweck))
+
+plot(1, 1, type = 'n', xlim = c(xmin, xmax), ylim = c(ymin, ymax),
+     xaxs = 'i', yaxs = 'i', axes = FALSE, ann = FALSE, log = 'x')
+abline(h = seq(ymin, ymax, 0.1), col = 'grey80')
+abline(v = c(seq(1e-4, 9e-4, 1e-4), seq(1e-3, 9e-3, 1e-3),
+             seq(0.01, 0.1, 0.01), seq(0.2, 1, 0.1), seq(2, 4)),
+       col = 'grey80')
+abline(h = seq(ymin, ymax, 0.5), col = 'grey60')
+abline(v = c(1e-4, 1e-3, 0.01, 0.1), col = 'grey60')
+abline(v = max(p.all), col = 'red')
+for (i in 1:nrow(zweck)) {
+  abline(v = zweck$p.max[i], col = cols[i])
+  lines(ep$ep, ep[,(i+1)], lwd = 2, col = cols[i])
+}
+title(xlab = 'Überschreitenswahrscheinlichkeit [%]')
+title(ylab = 'Schadengrad [%]')
+legend('topright', zweck$name, lwd = 2, col = cols,
+       bg = 'white', box.col = 'grey60')
+axis(1, c(seq(1e-4, 9e-4, 1e-4), seq(1e-3, 9e-3, 1e-3),
+          seq(0.01, 0.1, 0.01),seq(0.2, 1, 0.1), seq(2, 5)),
+     labels = FALSE)
+axis(1, c(1e-5, 1e-4, 1e-3))
+axis(1, c(0.01, 0.02, 0.05))
+axis(1, c(0.1, 0.2, 0.5))
+axis(1, c(1, 2, 5))
+axis(2, seq(ymin, ymax, 0.1), labels = FALSE)
+axis(2, seq(ymin, ymax, 0.5), labels = 100*seq(ymin, ymax, 0.5),
+     las = 1)
+box()
+
+zweck2 <- cbind(zweck$name,
+                formatC(zweck$number, format = 'd', big.mark = "'"),
+                formatC(zweck$num, format = 'd', big.mark = "'"),
+                paste(round(zweck$p.max, digits = 2), '%', sep = ''))
+knitr::kable(zweck2, col.names = c('Zweckbestimmung', 'Anzahl Gebäude',
+                                   'Anzahl Schäden',
+                                   'jährliche Brandwahrscheinlichkeit'),
+             align = c('l', 'r', 'r', 'c'))
+
+```
+
+### Weitere Auswertungen
+Im nächsten Abschnitt ein paar Auswertungen bzgl. Anzahl Schäden, Schadensumme und Verteilung der Schadengrade in Abhängigkeit von Schadenjahr, Baujahr, Schadenmonat, Zweckcode und Schadenursache.
+```{r}
+schad2 <- schad[,c('GebaeudeGemeindeName', 'GebaeudePlz',
+                   'GebaeudeOrt', 'SchadenDatum', 'Ausdr3',
+                   'GebaeudeBaujahr', 'schad_index', 'schad_ratio',
+                   'zweck_code', 'CodTextDt', 'verletzte',
+                   'todesopfer')]
+schad2$monat <- as.integer(substr(schad2$SchadenDatum, 6, 7))
+schad2$zweck1 <- floor(schad2$zweck_code / 1000)
+schad2$ursache <- as.integer(substr(schad2$CodTextDt, 1, 2))
+
+library(data.table)
+schad.dt <- data.table(schad2)
+```
+### Pro Schadenjahr
+```{r}
+schad.jahr <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = Ausdr3]
+plot(schad.jahr$Ausdr3, schad.jahr$summe/1e6, xlab = 'Schadenjahr',
+     ylab = 'jährliche Schadensumme [mio CHF]', las = 1)
+plot(schad.jahr$Ausdr3, schad.jahr$anzahl, xlab = 'Schadenjahr',
+     ylab = 'Anzahl Schäden', las = 1)
+indf <- which(is.finite(schad2$schad_ratio) & schad2$schad_ratio > 0)
+boxplot(schad2$schad_ratio[indf] ~ schad2$Ausdr3[indf], las = 1,
+        xlab = 'Schadenjahr', ylab = 'Schadengrad')
+boxplot(schad2$schad_ratio[indf] ~ schad2$Ausdr3[indf], las = 1,
+        log = 'y', xlab = 'Schadenjahr', ylab = 'Schadengrad')
+```
+### Pro Baujahr
+```{r}
+schad.bauj <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = GebaeudeBaujahr]
+plot(schad.bauj$GebaeudeBaujahr, schad.bauj$summe/1e6, xlab = 'Baujahr',
+     ylab = 'jährliche Schadensumme [mio CHF]', las = 1)
+plot(schad.bauj$GebaeudeBaujahr, schad.bauj$anzahl, xlab = 'Baujahr',
+     ylab = 'Anzahl Schäden', las = 1)
+indf <- which(is.finite(schad2$schad_ratio) & schad2$schad_ratio > 0 &
+                schad2$GebaeudeBaujahr >= 1700)
+boxplot(schad2$schad_ratio[indf] ~ floor(schad2$GebaeudeBaujahr[indf]/10),
+        las = 1, ylab = 'Schadengrad', xlab = 'Baujahr/10')
+boxplot(schad2$schad_ratio[indf] ~ floor(schad2$GebaeudeBaujahr[indf]/10),
+        las = 1, log = 'y', ylab = 'Schadengrad', xlab = 'Baujahr/10')
+```
+### Pro Schadenmonat
+```{r}
+schad.mon <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = monat]
+plot(schad.mon$monat, schad.mon$summe/1e6, xlab = 'Schadenmonat',
+     ylab = 'jährliche Schadensumme [mio CHF]', las = 1)
+plot(schad.mon$monat, schad.mon$anzahl, xlab = 'Schadenmonat',
+     ylab = 'Anzahl Schäden', las = 1)
+indf <- which(is.finite(schad2$schad_ratio) & schad2$schad_ratio > 0)
+boxplot(schad2$schad_ratio[indf] ~ schad2$monat[indf],
+        las = 1, ylab = 'Schadengrad', xlab = 'Schadenmonat')
+boxplot(schad2$schad_ratio[indf] ~ schad2$monat[indf],
+        las = 1, log = 'y', ylab = 'Schadengrad', xlab = 'Schadenmonat')
+```
+### Pro Zweckcode (1-stellig)
+```{r}
+schad.zw <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = zweck1]
+plot(schad.zw$zweck1, schad.zw$summe/1e6, xlab = 'Zweckcode',
+     ylab = 'jährliche Schadensumme [mio CHF]', las = 1)
+plot(schad.zw$zweck1, schad.zw$anzahl, xlab = 'Zweckcode',
+     ylab = 'Anzahl Schäden', las = 1)
+indf <- which(is.finite(schad2$schad_ratio) & schad2$schad_ratio > 0)
+boxplot(schad2$schad_ratio[indf] ~ schad2$zweck1[indf],
+        las = 1, ylab = 'Schadengrad', xlab = 'Zweckcode')
+boxplot(schad2$schad_ratio[indf] ~ schad2$zweck1[indf],
+        las = 1, log = 'y', ylab = 'Schadengrad', xlab = 'Zweckcode')
+```
+### Pro Schadenursache
+```{r}
+schad.urs <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = ursache]
+plot(schad.urs$ursache, schad.urs$summe/1e6, xlab = 'Schadenursache',
+     ylab = 'jährliche Schadensumme [mio CHF]', las = 1)
+plot(schad.urs$ursache, schad.urs$anzahl, xlab = 'Schadenursache',
+     ylab = 'Anzahl Schäden', las = 1)
+indf <- which(is.finite(schad2$schad_ratio) & schad2$schad_ratio > 0)
+boxplot(schad2$schad_ratio[indf] ~ schad2$ursache[indf],
+        las = 1, ylab = 'Schadengrad', xlab = 'Schadenursache')
+boxplot(schad2$schad_ratio[indf] ~ schad2$ursache[indf],
+        las = 1, log = 'y', ylab = 'Schadengrad', xlab = 'Schadenursache')
+
+```

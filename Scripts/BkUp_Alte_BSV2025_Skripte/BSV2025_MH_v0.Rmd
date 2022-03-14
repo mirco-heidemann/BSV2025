@@ -1,0 +1,140 @@
+---
+title: "BSV2025"
+author: "Mirco Heidemann"
+date: "Dezember 2018"
+output: html_notebook
+abstract:
+  This is the abstract...
+---
+
+#### Datenimport und Wrangling:
+- Aus der gesamten Schadendatenbank nur Feuerschäden mit Schadendatum zwischen 1981 und 2018 filtern.
+- Nur Schäden, die die GVZ vergütet, d.h. Schadensumme grösser Null oder anderer Schwellenwer, zB. CHF 1'000?
+- Doppelte Schadennummern dürfen nur einmal verwendet werden (Teilauszahlungen).
+- Die Schäden werden auf den Stand von Dezember 2018 indexiert. Für die Indexierung wird der GVZ-Index verwendet.
+
+```{r setup}
+library('tidyverse')
+library('ggpubr')
+```
+
+```{r message = FALSE}
+## relative pfade
+data_pth = '../Data/'
+
+# Indexierungsfile laden
+gvz_index <- read_csv2(paste0(data_pth, 'versicherungsindex_gvz.csv')) %>% 
+  # take 'illegal' characters and replaces them with periods
+  rename_all(make.names) %>% 
+  mutate(jahr = as.integer(format(as.Date(Jahr,"%d.%m.%Y"), "%Y")),
+         index = as.integer(Versicherungsindex.GVZ)) %>% 
+  dplyr::select(c(5, 6))
+
+# Schadendaten mit Brandopfern laden und filtern: Nur Feuerschäden zwischen 1981 und 2018
+brand <- read_csv2(paste0(data_pth, 'gvz_schaeden_mit_brandopfern_201812.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1980 & Ausdr3 < 2019) %>% 
+  rename(verletzte = SchadenVerletzte, todesopfer = SchadenTodesopfer) %>% 
+  dplyr::select(c(2, 22:23))
+
+# Schadendaten laden und filtern: Nur Feuerschäden zwischen 1981 und 2018
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>% 
+  filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1980 & Ausdr3 < 2019) %>% 
+  ## schaeden indexieren
+  left_join(gvz_index, by = c("Ausdr3" = "jahr")) %>% 
+  mutate(schad_index = round(max(index) / index * SchadenSumme),
+         schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", t)), "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_short = as.integer(str_sub(zweckcode, 1, 2)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+"))) %>% 
+  left_join(brand, by = c('SchadenId' = 'SchadenId')) %>% 
+  # Annahme: NA's in Todesopfer = 0
+  mutate(todesopfer = ifelse(is.na(todesopfer), 0, todesopfer),
+         verletzte = ifelse(is.na(verletzte), 0, verletzte)) %>% 
+  dplyr::select(-c(3, 5, 6, 11, 14:17, 20:22, 24, 25))
+
+## doppelten Schaden ID's nur einmal beruecksichtigen!
+
+## welche schaden ID sind doppelt vorhanden?
+schad_duplicates = schad %>%
+  group_by(SchadenId) %>%
+  filter(n() > 1) %>%
+  ## duplikate nur einmal anzeigen
+  filter(row_number() == 1)
+
+## doppelte schaden ID Zeilen nur einmal
+schad = schad %>%
+  ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE)
+
+# Check data
+summary(schad)
+
+```
+
+#### Welche Brandereignisse führten zu Branopfern?
+```{r}
+brandopfer <- schad %>% filter(todesopfer > 0)
+tbl_zweck <- brandopfer %>% 
+  group_by(zweckcode) %>%
+  summarise(anzahl = n()) %>%
+  mutate(anteil = round(anzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+tbl_ursache <- brandopfer %>% 
+  group_by(schadencode) %>%
+  summarise(anzahl = n()) %>%
+  mutate(anteil = round(anzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+tbl_baujahr <- brandopfer %>% 
+  group_by(GebaeudeBaujahr) %>%
+  summarise(anzahl = n()) %>%
+  mutate(anteil = round(anzahl / sum(schad$todesopfer > 0), 3) * 100)
+
+```
+
+#### Zusammenfassen und Gruppieren nach Todesopfern
+Annahme: NA's in Todesopfer = 0
+```{r}
+(tbl <- group_by(schad, todesopfer) %>%
+   summarise(
+     Anzahl = formatC(n(), format="f", big.mark="'", digits=0),
+     Mittelwert = formatC(mean(schad_index, na.rm = TRUE), format="f",
+                          big.mark="'", digits=0),
+     Median = formatC(median(schad_index, na.rm = TRUE), format="f", big.mark="'", digits=0)))
+
+# Box plots der Schadensumme pro Todesopfer-Gruppe
+
+# Get counts by desired grouping variables
+counts = schad %>% group_by(todesopfer) %>% tally
+
+# filter schaden grösser 0 --> später noch anpassen
+df <- schad %>% filter(schad_index != 0) %>% 
+  mutate(lg_schadensumme = log(schad_index),
+         fact_todesopfer = as.factor(todesopfer))
+
+ggplot(data = df, mapping = aes(x = fact_todesopfer, y = lg_schadensumme,
+                                color = fact_todesopfer)) +
+  geom_boxplot(outlier.colour = "#bdbdbd") +
+  labs(title = "Zusammenhang zwischen Schadensumme und Todesopfern",
+       x = "Anzahl Todesopfer",
+       y = "Log Schadensumme",
+       caption = "Quelle: GVZ") +
+  theme_bw() +
+  theme(legend.position = "none") 
+# Plot mit anzahl pro gruppe aus 'tbl' ergänzen
+
+```
+

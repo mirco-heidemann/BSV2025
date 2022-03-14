@@ -1,0 +1,211 @@
+---
+title: "BSV2025 - Modellierung der jährlichen Brandschäden"
+author: "Mirco Heidemann"
+date: "Dezember 2018"
+output:
+  pdf_document: default
+abstract: EP Kurven pro einstelligem Zweckcode. Die Anzahl Schäden pro Jahr und Zweckcode mit einer Poissonverteilung, die Schadensumme mit einer Lognormalverteilung schätzen.
+---
+
+```{r setup, echo = TRUE, include = FALSE}
+library(tidyverse)
+library(MASS)
+```
+
+```{r message = FALSE, cache=TRUE}
+## relative pfade
+data_pth = '../Data/'
+
+# Indexierungsfile laden
+gvz_index <- read_csv2(paste0(data_pth, 'versicherungsindex_gvz.csv')) %>% 
+  # take 'illegal' characters and replaces them with periods
+  rename_all(make.names) %>% 
+  mutate(jahr = as.integer(format(as.Date(Jahr,"%d.%m.%Y"), "%Y")),
+         index = as.integer(Versicherungsindex.GVZ)) %>% 
+  dplyr::select(c(5, 6))
+
+# Schadendaten laden und filtern: Nur Feuerschäden zwischen 1981 und 2018
+schad <- read_csv2(paste0(data_pth, 'Schaeden_20181015.csv'),
+                 locale(encoding = "iso-8859-1"), col_names = TRUE,
+                 col_types = cols(
+                   SchadenSumme = col_number(),
+                   FkoZaTot = col_number(),
+                   SchadenDatum = col_date(format = "%d.%m.%Y"),
+                   FkoVersDa = col_date(format = "%d.%m.%Y"))) %>% 
+  dplyr::filter(str_detect(SchadenArtBezeichnung, 'Feuer'),
+         Ausdr3 > 1981 & Ausdr3 < 2018) %>% 
+  ## schaeden indexieren
+  left_join(gvz_index, by = c("Ausdr3" = "jahr")) %>% 
+  mutate(schad_index = round(max(index) / index * SchadenSumme),
+         schadensatz = ifelse(SbwVerWert > 0, SchadenSumme / SbwVerWert, 0),
+         zweck = as.character(str_trim(gsub("\\,", "", gsub("\\d", "", GebaeudeZweckText)),
+                                       "left")),
+         zweckcode = as.integer(str_extract(GebaeudeZweckText, "[[:digit:]]+")),
+         zweckcode_kat = as.integer(str_sub(zweckcode, 1, 2)),
+         zweckcode_einstellig = as.integer(str_sub(zweckcode, 1, 1)),
+         schadenursache = as.character(str_trim(gsub("\\d", "", CodTextDt), "left")),
+         schadencode = as.integer(str_extract(CodTextDt, "[[:digit:]]+")))
+
+## doppelten Schaden ID's nur einmal beruecksichtigen!
+
+## welche schaden ID sind doppelt vorhanden?
+schad_duplicates = schad %>%
+  group_by(SchadenId) %>%
+  dplyr::filter(n() > 1) %>%
+  ## duplikate nur einmal anzeigen
+  dplyr::filter(row_number() == 1)
+
+## doppelte schaden ID Zeilen nur einmal
+schad = schad %>%
+  ## duplikate nur einmal
+  distinct(SchadenId, .keep_all = TRUE)
+```
+
+#### Aggregierte Schäden pro Jahr und einstelligem Zweckcode
+```{r message=FALSE}
+tbl_year_zwkcd <- schad %>%
+  dplyr::filter(schad_index > 0) %>% 
+  group_by(zweckcode_einstellig, Ausdr3) %>% 
+  summarize(schadenanzahl = n()) %>% 
+  rename(jahr = Ausdr3)
+```
+
+#### Sampling der Jahresschäden pro Zweckcode (einstellig)
+Jährliche Schadenanzahl per Zweckcode mit einer Poissonverteilung, die Schadensummen mit einer Lognormalverteilung schätzen.
+```{r}
+## Anzahl simulierte jahre
+nSim <- 1e5
+
+## w'keit und wkp skalen definieren
+wkp <- (nSim + 1) / c(1:nSim)
+ep <- 1/wkp
+
+# Resultate Liste initierung
+ep_lst <- list()
+
+## Sampling über alle einstelligen Zweckcodes
+for (j in unique(tbl_year_zwkcd$zweckcode_einstellig))
+{
+  dat_anzahl <- tbl_year_zwkcd %>% dplyr::filter(zweckcode_einstellig == j)
+  
+  # Anzahl Schäden mit einer Poissonverteilung schätzen
+  fit_freq <- fitdistr(dat_anzahl$schadenanzahl, "Poisson")
+  lambda <- fit_freq$estimate["lambda"]
+  
+  #### Schadensumme per Zweckcode mit einer Lognormalverteilung schätzen
+  einzel_schaden <- schad %>% dplyr::filter(schad_index > 0 &
+                                              zweckcode_einstellig == j)
+
+  fit_loss <- fitdistr(einzel_schaden$schad_index, "lognormal")
+  mean_loss <- fit_loss$estimate["meanlog"]
+  sd_loss <- fit_loss$estimate["sdlog"]
+
+  ## Vektor Initialisierung für die Jahresschadenverteilung
+  sj <- rep(0, nSim)
+  
+  ## Random sampling anhand der Poissonverteilung: Jährliche Schadenanzahl
+  freq = rpois(nSim, lambda)
+
+  ## Zufalls Sampling der jährlichen Schadensummen (Convolution, Monte Carlo)
+  for(i in 1:nSim)
+    sj[i] <- sum(rlnorm(n = freq[i], meanlog = mean_loss, sdlog = sd_loss))
+  
+  ## --- Schadensumme Tail Begrenzung: Max jährliche Schadensumme nicht höher als das 1.5-fache
+  ## des teuersten Gebäudes in der jeweiligen Zweckcode Kategorie
+  ind <- which(schad$zweckcode_einstellig == j)
+  max_loss <- 1.5 * max(schad$SbwVerWert[ind])
+  ind <- which(sj > max_loss)
+  sj[ind] <- max_loss
+
+  # EP Kurven in Liste speichern
+  ep_lst[[j]] <- cbind(sort(sj, decreasing = TRUE), wkp, ep, j)
+}
+
+## Konvertiere list zu df
+dfs <- lapply(ep_lst, data.frame, stringsAsFactors = FALSE) 
+df_ep_zwkcd <- dplyr::bind_rows(dfs)
+```
+
+#### Exceedance Probability Kurven
+Pro einstelligem Zweckcode eine EP Kurve
+```{r}
+# Plot einer EP pro einstelligem Zweckcode
+my_cols <- c('#5e4fa2','#3288bd','#66c2a5','#abdda4','#bf812d',
+             '#f46d43','#fdae61','#762a83','#1b7837','#d53e4f','#9e0142')
+theme_set(theme_bw(base_size = 12))
+
+ggplot(data = df_ep_zwkcd, aes(x = ep, y = V1/1e6, colour = factor(j))) +
+  geom_line() +
+  scale_color_manual(name = "Zweckcode", values = my_cols[1:9]) +
+  xlab('Überschreitenswahrscheinlichkeit [%]') +
+  ylab('Jahresschaden [Mio. CHF]') +
+  coord_trans(x = "log10") +
+  labs(title = "Überschreitenswahrscheinlichkeit jährlicher GVZ Brandschäden", 
+       subtitle = "Simulierte Brandschadenverteilung", 
+       caption = "Quelle: GVZ") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+#### Exceedance Probability Kurven - Zoom zu häufigeren Wahrscheinlichkeiten
+Pro einstelligem Zweckcode eine EP Kurve
+```{r}
+ggplot(data = df_ep_zwkcd, aes(x = ep, y = V1/1e6, colour = factor(j))) +
+  geom_line() +
+  scale_color_manual(name = "Zweckcode", values = my_cols[1:9]) +
+  xlab('Überschreitenswahrscheinlichkeit [%]') +
+  ylab('Jahresschaden [Mio. CHF]') +
+  ## Mit Zoom
+  coord_trans(x = "log10", limx=c(1/2000, 1.5), limy=c(0, 75)) +
+  labs(title = "Überschreitenswahrscheinlichkeit jährlicher GVZ Brandschäden", 
+       subtitle = "Simulierte Brandschadenverteilung", 
+       caption = "Quelle: GVZ") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+#### Die Occurrence Exceedance Probability (OEP) beschreibt die Verteilung des grössten Brandschadens in einem Jahr über alle Zweckcodes.
+```{r}
+df_oep <- df_ep_zwkcd %>%
+  mutate(sim_jahr = rep(seq(1, nSim, by = 1), 9)) %>% 
+  group_by(sim_jahr) %>% 
+  summarize(largest_loss = max(V1)) %>% 
+  arrange(desc(largest_loss)) %>% 
+  mutate(wkp = (nSim + 1) / c(1:nSim),
+         ep = 1/wkp)
+```
+
+#### Die Aggregate Exceedance Probability (AEP) beschreibt die Verteilung der gesamten, jährlichen Brandschäden über alle Zweckcodes.
+```{r}
+df_aep <- df_ep_zwkcd %>%
+  mutate(sim_jahr = rep(seq(1, nSim, by = 1), 9)) %>% 
+  group_by(sim_jahr) %>% 
+  summarize(gesamt_loss = sum(V1)) %>% 
+  arrange(desc(gesamt_loss)) %>% 
+  mutate(wkp = (nSim + 1) / c(1:nSim),
+         ep = 1/wkp)
+```
+
+#### Alle Exceedance Probability Kurven in einem Plot
+```{r}
+# my_lines <- c(rep("solid", 9), "dashed", "dotted")
+# 
+# ggplot() +
+#   geom_line(data = df_ep_zwkcd, aes(x = ep, y = V1/1e6, color = factor(j))) + #,linetype = j) +
+#   geom_line(data = df_aep, aes(x = ep, y = gesamt_loss/1e6, colour = "AEP"),
+#             linetype = "dashed") +
+#   geom_line(data = df_oep, aes(x = ep, y = largest_loss/1e6, colour = "OEP"),
+#             linetype = "dotted") +
+#   scale_color_manual(name = "Zweckcode", values = my_cols) +
+#   scale_linetype_manual(name = "Zweckcode", values = my_lines) +
+#   xlab('Überschreitenswahrscheinlichkeit [%]') +
+#   ylab('Jahresschaden [Mio. CHF]') +
+#   coord_trans(x = "log10") +
+#   labs(title = "Überschreitenswahrscheinlichkeit jährlicher GVZ Brandschäden", 
+#        subtitle = "Simulierte Brandschadenverteilung", 
+#        caption = "Quelle: GVZ") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+

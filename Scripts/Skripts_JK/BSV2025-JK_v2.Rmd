@@ -1,0 +1,169 @@
+---
+title: "BSV2025"
+author: "Jan Kleinn"
+date: "01.01.2019"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_notebook: default
+  html_document:
+    df_print: paged
+  word_document: default
+mainfont: Helvetica
+---
+
+### von Mirco zusammengestellte Daten einlesen
+
+```{r}
+in.file <- '../Schaeden-sortiert.csv'
+schad <- read.csv(in.file, stringsAsFactors = FALSE)
+```
+
+### Brandursachen und Zweckcodes
+Versuchen herauszufinden, welche Brandursachen und welche zweistellingen Zweckcodes am meisten Schäden verursachen und am stärksten zur Schadensumme beitragen.
+
+```{r}
+## zweistelligen Zweickcode hinzufügen
+schad$zweck2 <- floor(schad$zweck_code / 100)
+
+## zweistelligen Brandursachen-Code hinzufügen
+schad$urs2 <- as.integer(substr(schad$CodTextDt, 1, 2))
+
+## Schadensumme über alle Schäden
+ssum <- sum(schad$schad_index)
+
+## Daten für weitere Bearbeitung extrahieren
+library(data.table)
+schad.dt <- as.data.table(schad[,c('schad_index', 'zweck2', 'urs2')])
+schad.urs <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                      by = urs2]
+schad.zweck <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                        by = zweck2]
+schad.both <- schad.dt[, .(summe = sum(schad_index), anzahl = .N),
+                       by = c('zweck2', 'urs2')]
+
+## Anzahl Schäden
+## Ursachen nach Anzahl sortiert extrahieren
+ind <- sort(schad.urs$anzahl, decreasing = TRUE, index.return = TRUE)$ix
+urs.anz <- schad.urs$urs2[ind]
+## Zweckcode nach Anzahl sortiert extrahieren
+ind <- sort(schad.zweck$anzahl, decreasing = TRUE, index.return = TRUE)$ix
+zweck.anz <- schad.zweck$zweck2[ind]
+## 2-dimensionalen Datensatz erstellen
+anz.2d <- array(dim = c(length(zweck.anz), length(urs.anz)))
+for (i in 1:length(zweck.anz)) {
+  for (j in 1:length(urs.anz)) {
+    ind <- which(schad.both$zweck2 == zweck.anz[i] &
+                   schad.both$urs2 == urs.anz[j])
+    if (length(ind) == 1) {
+      anz.2d[i,j] <- schad.both$anzahl[ind]
+    }
+  }
+}
+## mit Gesamtzahl normieren
+anz.2d <- 100 * anz.2d / sum(anz.2d, na.rm = TRUE)
+## Farbintervalle und Farben definieren
+breaks <- c(0, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 99)
+cols <- rainbow(length(breaks)-1, start = 0.16)
+
+plot(0, 0, type = 'n', xlim = c(0.5, length(zweck.anz) + 0.5),
+     ylim = c(0.5, length(urs.anz) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(zweck.anz)), c(1:length(urs.anz)), anz.2d,
+      breaks = breaks, col = cols, add = TRUE)
+axis(1, c(1:length(zweck.anz)), tick = FALSE,
+     label = as.character(zweck.anz), las = 0, cex.axis = 0.5, line = -0.5)
+axis(2, c(1:length(urs.anz)), tick = FALSE,
+     label = as.character(urs.anz), las = 1, cex.axis = 0.5, line = -0.5)
+title(xlab = 'Zweckcode')
+title(ylab = 'Brandursache')
+box()
+
+## Schadensumme
+## Ursachen nach Schadensumme sortiert extrahieren
+ind <- sort(schad.urs$summe, decreasing = TRUE, index.return = TRUE)$ix
+urs.sum <- schad.urs$urs2[ind]
+## Zweckcode nach Anzahl sortiert extrahieren
+ind <- sort(schad.zweck$summe, decreasing = TRUE, index.return = TRUE)$ix
+zweck.sum <- schad.zweck$zweck2[ind]
+## 2-dimensionalen Datensatz erstellen
+sum.2d <- array(dim = c(length(zweck.sum), length(urs.sum)))
+for (i in 1:length(zweck.sum)) {
+  for (j in 1:length(urs.sum)) {
+    ind <- which(schad.both$zweck2 == zweck.sum[i] &
+                   schad.both$urs2 == urs.sum[j])
+    if (length(ind) == 1) {
+      sum.2d[i,j] <- schad.both$summe[ind]
+    }
+  }
+}
+## mit Gesamtsumme normieren
+sum.2d <- 100 * sum.2d / sum(sum.2d, na.rm = TRUE)
+
+plot(0, 0, type = 'n', xlim = c(0.5, length(zweck.sum) + 0.5),
+     ylim = c(0.5, length(urs.sum) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(zweck.sum)), c(1:length(urs.sum)), sum.2d,
+      breaks = breaks, col = cols, add = TRUE)
+axis(1, c(1:length(zweck.sum)), tick = FALSE,
+     label = as.character(zweck.sum), las = 0, cex.axis = 0.5, line = -0.5)
+axis(2, c(1:length(urs.sum)), tick = FALSE,
+     label = as.character(urs.sum), las = 1, cex.axis = 0.5, line = -0.5)
+title(xlab = 'Zweckcode')
+title(ylab = 'Brandursache')
+box()
+```
+
+### Grafiken in separate Datei schreiben
+
+```{r, results = 'hide'}
+pdf.file <- 'BSV2025_Ursache-Zweck_v1.pdf'
+pdf(pdf.file, paper = 'a4', width = 8, height = 11)
+par(mfrow = c(2, 1), mar = c(4, 5, 3, 1), las = 1)
+
+plot(0, 0, type = 'n', xlim = c(0.5, length(zweck.anz) + 0.5),
+     ylim = c(0.5, length(urs.anz) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(zweck.anz)), c(1:length(urs.anz)), anz.2d,
+      breaks = breaks, col = cols, add = TRUE)
+axis(1, seq(1, length(zweck.anz), 2), tick = FALSE,
+     label = as.character(zweck.anz[seq(1, length(zweck.anz), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.anz), 2), tick = FALSE,
+     label = as.character(zweck.anz[seq(2, length(zweck.anz), 2)]),
+     las = 0, cex.axis = 0.75, line = 0)
+axis(2, seq(1, length(urs.anz), 2), tick = FALSE,
+     label = as.character(urs.anz[seq(1, length(urs.anz), 2)]),
+     las = 1, cex.axis = 0.75, line = -0.7)
+axis(2, seq(2, length(urs.anz), 2), tick = FALSE,
+     label = as.character(urs.anz[seq(2, length(urs.anz), 2)]),
+     las = 1, cex.axis = 0.75, line = 0.4)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursache', line = 2.5)
+title(main = 'Anzahl Schäden', line = 0.5)
+box()
+
+plot(0, 0, type = 'n', xlim = c(0.5, length(zweck.sum) + 0.5),
+     ylim = c(0.5, length(urs.sum) + 0.5), xaxs = 'i', yaxs = 'i',
+     axes = FALSE, ann = FALSE)
+image(c(1:length(zweck.sum)), c(1:length(urs.sum)), sum.2d,
+      breaks = breaks, col = cols, add = TRUE)
+axis(1, seq(1, length(zweck.sum), 2), tick = FALSE,
+     label = as.character(zweck.sum[seq(1, length(zweck.sum), 2)]),
+     las = 0, cex.axis = 0.75, line = -0.9)
+axis(1, seq(2, length(zweck.sum), 2), tick = FALSE,
+     label = as.character(zweck.sum[seq(2, length(zweck.sum), 2)]),
+     las = 0, cex.axis = 0.75, line = 0)
+axis(2, seq(1, length(urs.sum), 2), tick = FALSE,
+     label = as.character(urs.sum[seq(1, length(urs.sum), 2)]),
+     las = 1, cex.axis = 0.75, line = -0.7)
+axis(2, seq(2, length(urs.sum), 2), tick = FALSE,
+     label = as.character(urs.sum[seq(2, length(urs.sum), 2)]),
+     las = 1, cex.axis = 0.75, line = 0.4)
+title(xlab = 'Zweckcode', line = 2.2)
+title(ylab = 'Brandursache', line = 2.5)
+title(main = 'Schadensumme', line = 0.5)
+box()
+dev.off()
+```
+
